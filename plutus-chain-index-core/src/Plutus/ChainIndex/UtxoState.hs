@@ -7,6 +7,7 @@
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE NamedFieldPuns        #-}
 {-# LANGUAGE OverloadedStrings     #-}
+{-# LANGUAGE Strict                #-}
 {-# LANGUAGE TemplateHaskell       #-}
 {-# LANGUAGE ViewPatterns          #-}
 {-| The UTXO state, kept in memory by the chain index.
@@ -57,10 +58,15 @@ data UtxoState a =
         , _usTip        :: Tip -- ^ Tip of our chain sync client
         }
         deriving stock (Eq, Show, Generic)
-        deriving (Semigroup, Monoid) via (GenericSemigroupMonoid (UtxoState a))
         deriving anyclass (FromJSON, ToJSON)
 
 makeLenses ''UtxoState
+
+deriving via (GenericSemigroupMonoid (UtxoState a)) instance Monoid a => Monoid (UtxoState a)
+
+instance Semigroup a => Semigroup (UtxoState a) where
+    (UtxoState ud tp) <> (UtxoState ud' tp') =
+        UtxoState (ud <> ud') (tp <> tp')
 
 newtype BlockCount = BlockCount { getBlockCount :: Int }
   deriving (Semigroup, Monoid) via (Sum Int)
@@ -102,7 +108,8 @@ insert ::
        -> UtxoIndex a
        -> Either InsertUtxoFailed (InsertUtxoSuccess a)
 insert   UtxoState{_usTip=TipAtGenesis} _ = Left InsertUtxoNoTip
-insert s@UtxoState{_usTip=thisTip} ix =
+insert s@UtxoState{_usTip= thisTip} ix =
+    -- This number will be made into a command line argument in a future PR.
     let (before, after) = FT.split ((s <=) . snd) ix
     in case tip (utxoState after) of
         TipAtGenesis -> Right $ InsertUtxoSuccess{newIndex = before FT.|> s, insertPosition = InsertAtEnd}
@@ -122,8 +129,14 @@ rollbackWith
     -> Point
     -> UtxoIndex a
     -> Either RollbackFailed (RollbackResult a)
-rollbackWith f PointAtGenesis after = Right (RollbackResult TipAtGenesis (f mempty after))
-rollbackWith _ _ (viewTip -> TipAtGenesis) = Left RollbackNoTip
+-- Forcing a re-synchronisation of the chain starting from genesis.
+rollbackWith f PointAtGenesis after =
+    Right (RollbackResult TipAtGenesis (f mempty after))
+-- Partial synchronisation, starting from a given block id.
+-- TODO: After we implement persistent storage this should return
+--       Left RollbackNoTip.
+rollbackWith f _ after@(viewTip -> TipAtGenesis) =
+    Right (RollbackResult TipAtGenesis (f mempty after))
 rollbackWith f targetPoint idx@(viewTip -> currentTip)
     -- Already at the target point
     |  targetPoint `pointsToTip` currentTip =

@@ -11,7 +11,7 @@
     flags = { release = false; };
     package = {
       specVersion = "1.10";
-      identifier = { name = "cardano-wallet-core"; version = "2021.9.29"; };
+      identifier = { name = "cardano-wallet-core"; version = "2022.1.18"; };
       license = "Apache-2.0";
       copyright = "2018-2020 IOHK";
       maintainer = "operations@iohk.io";
@@ -50,6 +50,8 @@
           (hsPkgs."cardano-numeric" or (errorHandler.buildDepError "cardano-numeric"))
           (hsPkgs."cardano-ledger-core" or (errorHandler.buildDepError "cardano-ledger-core"))
           (hsPkgs."cardano-ledger-byron-test" or (errorHandler.buildDepError "cardano-ledger-byron-test"))
+          (hsPkgs."cardano-ledger-shelley-test" or (errorHandler.buildDepError "cardano-ledger-shelley-test"))
+          (hsPkgs."cardano-ledger-shelley" or (errorHandler.buildDepError "cardano-ledger-shelley"))
           (hsPkgs."cardano-ledger-alonzo" or (errorHandler.buildDepError "cardano-ledger-alonzo"))
           (hsPkgs."cardano-slotting" or (errorHandler.buildDepError "cardano-slotting"))
           (hsPkgs."cborg" or (errorHandler.buildDepError "cborg"))
@@ -57,6 +59,7 @@
           (hsPkgs."contra-tracer" or (errorHandler.buildDepError "contra-tracer"))
           (hsPkgs."cryptonite" or (errorHandler.buildDepError "cryptonite"))
           (hsPkgs."data-default" or (errorHandler.buildDepError "data-default"))
+          (hsPkgs."dbvar" or (errorHandler.buildDepError "dbvar"))
           (hsPkgs."deepseq" or (errorHandler.buildDepError "deepseq"))
           (hsPkgs."digest" or (errorHandler.buildDepError "digest"))
           (hsPkgs."directory" or (errorHandler.buildDepError "directory"))
@@ -72,6 +75,7 @@
           (hsPkgs."foldl" or (errorHandler.buildDepError "foldl"))
           (hsPkgs."generic-lens" or (errorHandler.buildDepError "generic-lens"))
           (hsPkgs."generic-arbitrary" or (errorHandler.buildDepError "generic-arbitrary"))
+          (hsPkgs."generics-sop" or (errorHandler.buildDepError "generics-sop"))
           (hsPkgs."hashable" or (errorHandler.buildDepError "hashable"))
           (hsPkgs."hedgehog" or (errorHandler.buildDepError "hedgehog"))
           (hsPkgs."hedgehog-quickcheck" or (errorHandler.buildDepError "hedgehog-quickcheck"))
@@ -114,14 +118,14 @@
           (hsPkgs."servant" or (errorHandler.buildDepError "servant"))
           (hsPkgs."servant-client" or (errorHandler.buildDepError "servant-client"))
           (hsPkgs."servant-server" or (errorHandler.buildDepError "servant-server"))
-          (hsPkgs."shelley-spec-ledger" or (errorHandler.buildDepError "shelley-spec-ledger"))
-          (hsPkgs."shelley-spec-ledger-test" or (errorHandler.buildDepError "shelley-spec-ledger-test"))
           (hsPkgs."split" or (errorHandler.buildDepError "split"))
           (hsPkgs."splitmix" or (errorHandler.buildDepError "splitmix"))
           (hsPkgs."statistics" or (errorHandler.buildDepError "statistics"))
+          (hsPkgs."stm" or (errorHandler.buildDepError "stm"))
           (hsPkgs."streaming-commons" or (errorHandler.buildDepError "streaming-commons"))
           (hsPkgs."strict-containers" or (errorHandler.buildDepError "strict-containers"))
           (hsPkgs."strict-non-empty-containers" or (errorHandler.buildDepError "strict-non-empty-containers"))
+          (hsPkgs."strict-stm" or (errorHandler.buildDepError "strict-stm"))
           (hsPkgs."string-interpolate" or (errorHandler.buildDepError "string-interpolate"))
           (hsPkgs."template-haskell" or (errorHandler.buildDepError "template-haskell"))
           (hsPkgs."text" or (errorHandler.buildDepError "text"))
@@ -138,6 +142,7 @@
           (hsPkgs."wai" or (errorHandler.buildDepError "wai"))
           (hsPkgs."warp" or (errorHandler.buildDepError "warp"))
           (hsPkgs."warp-tls" or (errorHandler.buildDepError "warp-tls"))
+          (hsPkgs."wide-word" or (errorHandler.buildDepError "wide-word"))
           (hsPkgs."x509" or (errorHandler.buildDepError "x509"))
           (hsPkgs."x509-store" or (errorHandler.buildDepError "x509-store"))
           (hsPkgs."x509-validation" or (errorHandler.buildDepError "x509-validation"))
@@ -159,6 +164,7 @@
           "Cardano/Pool/DB/Sqlite/TH"
           "Cardano/Pool/Metadata"
           "Cardano/Wallet"
+          "Cardano/Wallet/Address/Pool"
           "Cardano/Wallet/Api"
           "Cardano/Wallet/Api/Client"
           "Cardano/Wallet/Api/Link"
@@ -167,9 +173,13 @@
           "Cardano/Wallet/Api/Types"
           "Cardano/Wallet/Compat"
           "Cardano/Wallet/DB"
+          "Cardano/Wallet/DB/Checkpoints"
           "Cardano/Wallet/DB/MVar"
           "Cardano/Wallet/DB/Model"
           "Cardano/Wallet/DB/Sqlite"
+          "Cardano/Wallet/DB/Sqlite/AddressBook"
+          "Cardano/Wallet/DB/Sqlite/CheckpointsOld"
+          "Cardano/Wallet/DB/Sqlite/Migration"
           "Cardano/Wallet/DB/Sqlite/TH"
           "Cardano/Wallet/DB/Sqlite/Types"
           "Cardano/Wallet/Logging"
@@ -223,7 +233,9 @@
           "Cardano/Wallet/Version"
           "Cardano/Wallet/Version/TH"
           "Control/Concurrent/Concierge"
+          "Control/Monad/Random/Extra"
           "Crypto/Hash/Utils"
+          "Data/Aeson/Extra"
           "Data/Function/Utils"
           "Data/Time/Text"
           "Data/Time/Utils"
@@ -269,6 +281,8 @@
             (hsPkgs."cardano-ledger-byron" or (errorHandler.buildDepError "cardano-ledger-byron"))
             (hsPkgs."cardano-ledger-byron-test" or (errorHandler.buildDepError "cardano-ledger-byron-test"))
             (hsPkgs."cardano-ledger-core" or (errorHandler.buildDepError "cardano-ledger-core"))
+            (hsPkgs."cardano-ledger-shelley" or (errorHandler.buildDepError "cardano-ledger-shelley"))
+            (hsPkgs."cardano-ledger-shelley-test" or (errorHandler.buildDepError "cardano-ledger-shelley-test"))
             (hsPkgs."cardano-wallet-core" or (errorHandler.buildDepError "cardano-wallet-core"))
             (hsPkgs."cardano-wallet-launcher" or (errorHandler.buildDepError "cardano-wallet-launcher"))
             (hsPkgs."cardano-wallet-test-utils" or (errorHandler.buildDepError "cardano-wallet-test-utils"))
@@ -289,6 +303,7 @@
             (hsPkgs."foldl" or (errorHandler.buildDepError "foldl"))
             (hsPkgs."generic-arbitrary" or (errorHandler.buildDepError "generic-arbitrary"))
             (hsPkgs."generic-lens" or (errorHandler.buildDepError "generic-lens"))
+            (hsPkgs."generics-sop" or (errorHandler.buildDepError "generics-sop"))
             (hsPkgs."hedgehog" or (errorHandler.buildDepError "hedgehog"))
             (hsPkgs."hedgehog-quickcheck" or (errorHandler.buildDepError "hedgehog-quickcheck"))
             (hsPkgs."hspec" or (errorHandler.buildDepError "hspec"))
@@ -299,6 +314,7 @@
             (hsPkgs."http-client-tls" or (errorHandler.buildDepError "http-client-tls"))
             (hsPkgs."http-media" or (errorHandler.buildDepError "http-media"))
             (hsPkgs."http-types" or (errorHandler.buildDepError "http-types"))
+            (hsPkgs."int-cast" or (errorHandler.buildDepError "int-cast"))
             (hsPkgs."iohk-monitoring" or (errorHandler.buildDepError "iohk-monitoring"))
             (hsPkgs."io-classes" or (errorHandler.buildDepError "io-classes"))
             (hsPkgs."io-sim" or (errorHandler.buildDepError "io-sim"))
@@ -313,7 +329,6 @@
             (hsPkgs."plutus-ledger-api" or (errorHandler.buildDepError "plutus-ledger-api"))
             (hsPkgs."pretty-simple" or (errorHandler.buildDepError "pretty-simple"))
             (hsPkgs."regex-pcre-builtin" or (errorHandler.buildDepError "regex-pcre-builtin"))
-            (hsPkgs."shelley-spec-ledger" or (errorHandler.buildDepError "shelley-spec-ledger"))
             (hsPkgs."OddWord" or (errorHandler.buildDepError "OddWord"))
             (hsPkgs."ouroboros-consensus" or (errorHandler.buildDepError "ouroboros-consensus"))
             (hsPkgs."QuickCheck" or (errorHandler.buildDepError "QuickCheck"))
@@ -326,7 +341,6 @@
             (hsPkgs."scrypt" or (errorHandler.buildDepError "scrypt"))
             (hsPkgs."servant" or (errorHandler.buildDepError "servant"))
             (hsPkgs."servant-server" or (errorHandler.buildDepError "servant-server"))
-            (hsPkgs."shelley-spec-ledger-test" or (errorHandler.buildDepError "shelley-spec-ledger-test"))
             (hsPkgs."should-not-typecheck" or (errorHandler.buildDepError "should-not-typecheck"))
             (hsPkgs."splitmix" or (errorHandler.buildDepError "splitmix"))
             (hsPkgs."strict-non-empty-containers" or (errorHandler.buildDepError "strict-non-empty-containers"))
@@ -362,6 +376,7 @@
             "Cardano/Pool/DB/MVarSpec"
             "Cardano/Pool/DB/Properties"
             "Cardano/Pool/DB/SqliteSpec"
+            "Cardano/Wallet/Address/PoolSpec"
             "Cardano/Wallet/Api/Malformed"
             "Cardano/Wallet/Api/Server/TlsSpec"
             "Cardano/Wallet/Api/ServerSpec"
@@ -415,6 +430,7 @@
             "Cardano/Wallet/RegistrySpec"
             "Cardano/WalletSpec"
             "Control/Concurrent/ConciergeSpec"
+            "Control/Monad/Random/ExtraSpec"
             "Data/Function/UtilsSpec"
             "Data/QuantitySpec"
             "Data/Time/TextSpec"
@@ -462,11 +478,11 @@
       };
     } // {
     src = (pkgs.lib).mkDefault (pkgs.fetchgit {
-      url = "7";
+      url = "5";
       rev = "minimal";
       sha256 = "";
       }) // {
-      url = "7";
+      url = "5";
       rev = "minimal";
       sha256 = "";
       };

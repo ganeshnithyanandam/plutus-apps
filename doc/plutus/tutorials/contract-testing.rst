@@ -92,23 +92,33 @@ we can define it as follows, applying a minting policy defined in the code under
 .. literalinclude:: GameModel.hs
    :start-after: START import Game
    :end-before: END import Game
+.. literalinclude:: GameModel.hs
+   :start-after: START import TimeSlot
+   :end-before: END import TimeSlot
+.. literalinclude:: GameModel.hs
+   :start-after: START import Data.Default
+   :end-before: END import Data.Default
 
 .. literalinclude:: GameModel.hs
-   :start-after: START gameTokenVal
-   :end-before: END gameTokenVal
+   :start-after: START gameParam
+   :end-before: END gameParam
+
+.. literalinclude:: GameModel.hs
+   :start-after: START guessTokenVal
+   :end-before: END guessTokenVal
 
 The value of the :term:`token` is (with long hash values abbreviated):
 
 .. code-block:: text
 
-  > gameTokenVal
+  > guessTokenVal
   Value (Map [(f687...,Map [(guess,1)])])
 
 We can even construct a ``Value`` containing an Ada and a game :term:`token`:
 
 .. code-block:: text
 
-  > Ada.lovelaceValueOf 1 <> gameTokenVal
+  > Ada.lovelaceValueOf 1 <> guessTokenVal
   Value (Map [(,Map [(,1)]),(f687...,Map [(guess,1)])])
 
 If you inspect the output closely, you will see that a ``Value``
@@ -179,10 +189,9 @@ transferred correctly, and contracts didn't crash.
      There is also a more general function :hsobj:`Plutus.Contract.Test.ContractModel.propRunActions` that allows
      the check at the end of each test to be customized.
 
-But what is the ``instanceSpec`` in the code above? :hsobj:`Plutus.Contract.Test.ContractModel.propRunActions_`
-creates the contract instances that are needed by a test, and the
-``instanceSpec`` tells it which contract instances to create. A handle
-is created for each contract instance, which is used to invoke their
+But how does ``quickCheck`` know what code to run when you check ``prop_Game``?
+:hsobj:`Plutus.Contract.Test.ContractModel.propRunActions_` needs to create a handle
+for each contract instance, which is used to invoke their
 :term:`endpoints<endpoint>` from the test. Different contracts have different :term:`endpoints<endpoint>`,
 of different types--and thus different :term:`schemas<schema>`. When we invoke an
 :term:`endpoint`, we need to know the :term:`schema` of the contract we are invoking,
@@ -212,16 +221,19 @@ we simply distinguish contract instance keys by the wallet they are running in:
    :start-after: START ContractInstanceKey
    :end-before: END ContractInstanceKey
 
-Once this type is defined, we can construct our :hsobj:`Plutus.Contract.Test.ContractModel.ContractInstanceSpec`:
+Once this type is defined, we can tell QuickCheck what code to run for a given
+contract by filling in the
+:hsobj:`Plutus.Contract.Test.ContractModel.initialInstances`,
+:hsobj:`Plutus.Contract.Test.ContractModel.instanceWallet`, and
+:hsobj:`Plutus.Contract.Test.ContractModel.instanceContract` fields of the
+``ContractModel`` class:
 
 .. literalinclude:: GameModel.hs
-   :start-after: START instanceSpec
-   :end-before: END instanceSpec
+   :start-after: START initialHandleSpecs
+   :end-before: END initialHandleSpecs
 
-This specifies (reading from right to left) that we should create one
-contract instance per wallet, running ``G.contract``, the contract
-under test, in emulated wallet ``w``, and distinguished by a
-:hsobj:`Plutus.Contract.Test.ContractModel.ContractInstanceKey` of the form ``WalletKey w``.
+This specifies (reading top to bottom) that we should create one
+contract instance per wallet ``w``, that will run ``G.contract``, in wallet ``w``.
 
 Now we can run tests, although of course they will not yet succeed:
 
@@ -512,11 +524,14 @@ transfer the game :term:`token` from one wallet to another as specified by
 ``GiveToken`` actions.
 
 .. literalinclude:: GameModel.hs
+   :start-after: START gameParam
+   :end-before: END gameParam
+.. literalinclude:: GameModel.hs
    :start-after: START perform v1
    :end-before: END perform v1
 
 Every call to an end-point must be associated with one of the contract
-instances defined in our ``instanceSpec``; the ``handle`` argument to
+instances defined in our ``initialInstances``; the ``handle`` argument to
 :hsobj:`Plutus.Contract.Test.ContractModel.perform` lets us find the contract handle associated with each
 :hsobj:`Plutus.Contract.Test.ContractModel.ContractInstanceKey`.
 
@@ -672,13 +687,11 @@ blockchain. Likewise, we delay one slot after each of the other
 actions. (If the delays we insert are too short, we will discover this
 later via failed tests).
 
-We can cause the emulator to delay a number of slots like this:
+We add a call to ``delay`` in each branch of :hsobj:`Plutus.Contract.Test.ContractModel.perform`:
 
 .. literalinclude:: GameModel.hs
-   :start-after: START delay
-   :end-before: END delay
-
-We add a call to ``delay`` in each branch of :hsobj:`Plutus.Contract.Test.ContractModel.perform`:
+   :start-after: START gameParam
+   :end-before: END gameParam
 
 .. literalinclude:: GameModel.hs
    :start-after: START perform
@@ -1200,14 +1213,14 @@ we could instead write:
    :end-before: END unitTest v2
 
 Here :hsobj:`Plutus.Contract.Test.ContractModel.forAllQ` lets us generate a random value using
-:hsobj:`Plutus.Contract.Test.ContractModel.chooseQ`:
+:hsobj:`Test.QuickCheck.DynamicLogic.Quantify.chooseQ`:
 
 .. literalinclude:: GameModel.hs
    :start-after: START chooseQ type
    :end-before: END chooseQ type
 
 :hsobj:`Plutus.Contract.Test.ContractModel.forAllQ` takes a
-:hsobj:`Plutus.Contract.Test.ContractModel.Quantification`, which resembles a QuickCheck
+:hsobj:`Test.QuickCheck.DynamicLogic.Quantify.Quantification`, which resembles a QuickCheck
 generator, but with a more limited API to support its use in dynamic
 logic.
 

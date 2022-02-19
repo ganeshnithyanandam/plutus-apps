@@ -55,14 +55,14 @@ credential :: Credential
 credential =
     Credential
         { credName = kyc
-        , credAuthority = CredentialAuthority (walletPubKeyHash mirror)
+        , credAuthority = CredentialAuthority (mockWalletPaymentPubKeyHash mirror)
         }
 
 stoSubscriber :: STOSubscriber
 stoSubscriber =
     STOSubscriber
         { wCredential = credential
-        , wSTOIssuer = walletPubKeyHash issuer
+        , wSTOIssuer = mockWalletPaymentPubKeyHash issuer
         , wSTOTokenName = sto
         , wSTOAmount = numTokens
         }
@@ -70,7 +70,7 @@ stoSubscriber =
 stoData :: STOData
 stoData =
     STOData
-        { stoIssuer = walletPubKeyHash issuer
+        { stoIssuer = mockWalletPaymentPubKeyHash issuer
         , stoTokenName = sto
         , stoCredentialToken = Credential.token credential
         }
@@ -128,23 +128,31 @@ waitSlots = 10
 users :: [Wallet]
 users = [user, w4]
 
-deriving instance Eq   (ContractInstanceKey PrismModel w s e)
-deriving instance Show (ContractInstanceKey PrismModel w s e)
+deriving instance Eq   (ContractInstanceKey PrismModel w s e params)
+deriving instance Show (ContractInstanceKey PrismModel w s e params)
 
 instance ContractModel PrismModel where
 
     data Action PrismModel = Delay | Issue Wallet | Revoke Wallet | Call Wallet
         deriving (Eq, Show)
 
-    data ContractInstanceKey PrismModel w s e where
-        MirrorH  ::           ContractInstanceKey PrismModel () C.MirrorSchema            C.MirrorError
-        UserH    :: Wallet -> ContractInstanceKey PrismModel () C.STOSubscriberSchema     C.UnlockError
+    data ContractInstanceKey PrismModel w s e params where
+        MirrorH  ::           ContractInstanceKey PrismModel () C.MirrorSchema            C.MirrorError ()
+        UserH    :: Wallet -> ContractInstanceKey PrismModel () C.STOSubscriberSchema     C.UnlockError ()
 
     arbitraryAction _ = QC.oneof [pure Delay, genUser Revoke, genUser Issue,
                                   genUser Call]
         where genUser f = f <$> QC.elements users
 
     initialState = PrismModel { _walletState = Map.empty }
+
+    initialInstances = StartContract MirrorH () : ((`StartContract` ()) . UserH <$> users)
+
+    instanceWallet MirrorH   = mirror
+    instanceWallet (UserH w) = w
+
+    instanceContract _ MirrorH _ = C.mirror
+    instanceContract _ UserH{} _ = C.subscribeSTO
 
     precondition s (Issue w) = (s ^. contractState . isIssued w) /= Issued  -- Multiple Issue (without Revoke) breaks the contract
     precondition _ _         = True
@@ -153,8 +161,8 @@ instance ContractModel PrismModel where
         wait waitSlots
         case cmd of
             Delay     -> wait 1
-            Revoke w  -> isIssued w $~ doRevoke
-            Issue w   -> isIssued w $= Issued
+            Revoke w  -> isIssued w %= doRevoke
+            Issue w   -> isIssued w .= Issued
             Call w    -> do
               iss  <- (== Issued)   <$> viewContractState (isIssued w)
               pend <- (== STOReady) <$> viewContractState (stoState w)
@@ -164,43 +172,35 @@ instance ContractModel PrismModel where
                 mint stoValue
                 deposit w stoValue
 
-    perform handle _ cmd = case cmd of
+    perform handle _ _ cmd = case cmd of
         Delay     -> wrap $ delay 1
         Issue w   -> wrap $ delay 1 >> Trace.callEndpoint @"issue"   (handle MirrorH) CredentialOwnerReference{coTokenName=kyc, coOwner=w}
         Revoke w  -> wrap $ Trace.callEndpoint @"revoke"             (handle MirrorH) CredentialOwnerReference{coTokenName=kyc, coOwner=w}
         Call w    -> wrap $ Trace.callEndpoint @"sto"                (handle $ UserH w) stoSubscriber
         where                     -- v Wait a generous amount of blocks between calls
-            wrap m   = m *> delay waitSlots
+            wrap m   = () <$ m <* delay waitSlots
 
     shrinkAction _ Delay = []
     shrinkAction _ _     = [Delay]
 
     monitoring (_, s) _ = counterexample (show s)
 
-delay :: Integer -> Trace.EmulatorTrace ()
-delay n = void $ Trace.waitNSlots $ fromIntegral n
-
 finalPredicate :: ModelState PrismModel -> TracePredicate
 finalPredicate _ =
     assertNotDone @_ @() @C.STOSubscriberSchema     C.subscribeSTO      (Trace.walletInstanceTag user)              "User stopped"               .&&.
     assertNotDone @_ @() @C.MirrorSchema            C.mirror            (Trace.walletInstanceTag mirror)            "Mirror stopped"
 
-handleSpec :: [ContractInstanceSpec PrismModel]
-handleSpec = [ ContractInstanceSpec (UserH w) w                 C.subscribeSTO | w <- users ] ++
-             [ ContractInstanceSpec MirrorH   mirror            C.mirror ]
+
 
 prop_Prism :: Actions PrismModel -> Property
-prop_Prism = propRunActions @PrismModel handleSpec finalPredicate
+prop_Prism = propRunActions @PrismModel finalPredicate
 
 -- | The Prism contract does not lock any funds.
 noLockProof :: NoLockedFundsProof PrismModel
-noLockProof = NoLockedFundsProof
-  { nlfpMainStrategy   = return ()
-  , nlfpWalletStrategy = \ _ -> return ()
-  }
+noLockProof = defaultNLFP
 
 prop_NoLock :: Property
-prop_NoLock = checkNoLockedFundsProof defaultCheckOptions handleSpec noLockProof
+prop_NoLock = checkNoLockedFundsProof defaultCheckOptionsContractModel noLockProof
 
 tests :: TestTree
 tests = testGroup "PRISM"

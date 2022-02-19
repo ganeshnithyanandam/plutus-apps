@@ -8,6 +8,7 @@
 -- until https://github.com/input-output-hk/cardano-node/pull/2936 or something similar gets merged.
 module Ledger.Tx.CardanoAPITemp (makeTransactionBody') where
 
+import Data.List qualified as List
 import Data.Map.Strict qualified as Map
 import Data.Sequence.Strict qualified as Seq
 import Data.Set qualified as Set
@@ -19,7 +20,6 @@ import Cardano.Ledger.Crypto (StandardCrypto)
 import Ouroboros.Consensus.Shelley.Eras (StandardAlonzo)
 
 import Cardano.Ledger.Core qualified as Ledger
-import Cardano.Ledger.Shelley.Constraints qualified as Ledger
 
 import Cardano.Ledger.Alonzo.Data qualified as Alonzo
 import Cardano.Ledger.Alonzo.Tx qualified as Alonzo
@@ -108,11 +108,12 @@ makeTransactionBody'
           ]
 
     scriptdata :: [ScriptData]
-    scriptdata =
-        [ d | (_, AnyScriptWitness
-                    (PlutusScriptWitness
-                       _ _ _ (ScriptDatumForTxIn d) _ _)) <- witnesses
-            ]
+    scriptdata = List.nub $
+      [ d | TxOut _ _ (TxOutDatum ScriptDataInAlonzoEra d) <- txOuts ]
+      ++ [ d | (_, AnyScriptWitness
+                      (PlutusScriptWitness
+                        _ _ _ (ScriptDatumForTxIn d) _ _)) <- witnesses
+              ]
 
     redeemers :: Alonzo.Redeemers StandardAlonzo
     redeemers =
@@ -131,8 +132,7 @@ toShelleyWithdrawal withdrawals =
         | (stakeAddr, value, _) <- withdrawals ]
 
 toShelleyTxOut :: forall era ledgerera.
-                 (ShelleyLedgerEra era ~ ledgerera,
-                  IsShelleyBasedEra era, Ledger.ShelleyBased ledgerera)
+                 (ShelleyLedgerEra era ~ ledgerera, IsShelleyBasedEra era)
                => TxOut CtxTx era -> Ledger.TxOut ledgerera
 toShelleyTxOut (TxOut _ (TxOutAdaOnly AdaOnlyInByronEra _) _) =
     case shelleyBasedEra :: ShelleyBasedEra era of {}

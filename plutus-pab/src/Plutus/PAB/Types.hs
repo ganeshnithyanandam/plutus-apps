@@ -12,7 +12,7 @@
 module Plutus.PAB.Types where
 
 import Cardano.ChainIndex.Types qualified as ChainIndex
-import Cardano.Node.Types (MockServerConfig)
+import Cardano.Node.Types (PABServerConfig)
 import Cardano.Wallet.Types qualified as Wallet
 import Control.Lens.TH (makePrisms)
 import Control.Monad.Freer.Extras.Beam (BeamError)
@@ -28,6 +28,7 @@ import GHC.Generics (Generic)
 import Ledger (Block, Blockchain, Tx, TxId, eitherTx, txId)
 import Ledger.Index (UtxoIndex (UtxoIndex))
 import Ledger.Index qualified as UtxoIndex
+import Plutus.ChainIndex.Types (Point (..))
 import Plutus.Contract.Types (ContractError)
 import Plutus.PAB.Instances ()
 import Prettyprinter (Pretty, line, pretty, viaShow, (<+>))
@@ -58,6 +59,7 @@ data PABError
     | AesonDecodingError Text Text
     | MigrationNotDoneError Text
     | RemoteWalletWithMockNodeError
+    | TxSenderNotAvailable
     deriving stock (Show, Eq, Generic)
     deriving anyclass (ToJSON, FromJSON)
 
@@ -87,6 +89,7 @@ instance Pretty PABError where
                                    <> "Did you forget to run the 'migrate' command ?"
                                    <+> "(ex. 'plutus-pab-migrate' or 'plutus-pab-examples --config <CONFIG_FILE> migrate')"
         RemoteWalletWithMockNodeError   -> "The remote wallet can't be used with the mock node."
+        TxSenderNotAvailable         -> "Cannot send a transaction when connected to the real node."
 
 data DbConfig =
     DbConfig
@@ -114,12 +117,13 @@ data Config =
     Config
         { dbConfig                :: DbConfig
         , walletServerConfig      :: Wallet.WalletConfig
-        , nodeServerConfig        :: MockServerConfig
+        , nodeServerConfig        :: PABServerConfig
         , pabWebserverConfig      :: WebserverConfig
         , chainIndexConfig        :: ChainIndex.ChainIndexConfig
         , requestProcessingConfig :: RequestProcessingConfig
+        , developmentOptions      :: DevelopmentOptions
         }
-    deriving (Show, Eq, Generic, FromJSON)
+    deriving (Show, Eq, Generic, FromJSON, ToJSON)
 
 defaultConfig :: Config
 defaultConfig =
@@ -130,6 +134,7 @@ defaultConfig =
     , pabWebserverConfig = def
     , chainIndexConfig = def
     , requestProcessingConfig = def
+    , developmentOptions = def
     }
 
 instance Default Config where
@@ -140,7 +145,7 @@ newtype RequestProcessingConfig =
         { requestProcessingInterval :: Second -- ^ How many seconds to wait between calls to 'Plutus.PAB.Core.ContractInstance.processAllContractOutboxes'
         }
     deriving (Show, Eq, Generic)
-    deriving anyclass (FromJSON)
+    deriving anyclass (FromJSON, ToJSON)
 
 defaultRequestProcessingConfig :: RequestProcessingConfig
 defaultRequestProcessingConfig =
@@ -174,6 +179,24 @@ defaultWebServerConfig =
 
 instance Default WebserverConfig where
   def = defaultWebServerConfig
+
+data DevelopmentOptions =
+    DevelopmentOptions
+        { pabRollbackHistory :: Maybe Int
+        , pabResumeFrom      :: Point
+        }
+    deriving (Show, Eq, Generic)
+    deriving anyclass (FromJSON, ToJSON)
+
+defaultDevelopmentOptions :: DevelopmentOptions
+defaultDevelopmentOptions =
+    DevelopmentOptions
+        { pabRollbackHistory = Nothing
+        , pabResumeFrom      = PointAtGenesis
+        }
+
+instance Default DevelopmentOptions where
+    def = defaultDevelopmentOptions
 
 -- | The source of a PAB event, used for sharding of the event stream
 data Source

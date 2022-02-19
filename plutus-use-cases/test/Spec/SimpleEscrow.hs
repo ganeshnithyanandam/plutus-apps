@@ -100,14 +100,14 @@ token2 = Value.singleton "2222" "Token2"
 
 options :: CheckOptions
 options =
-    let initialDistribution = defaultDist & over (ix w1) ((<>) (token1 500))
-                                          & over (ix w2) ((<>) (token2 500))
-    in defaultCheckOptions & emulatorConfig . Trace.initialChainState .~ Left initialDistribution
+    defaultCheckOptions
+        & changeInitialWalletValue w1 ((<>) (token1 500))
+        & changeInitialWalletValue w2 ((<>) (token2 500))
 
 mkEscrowParams :: POSIXTime -> Value -> Value -> EscrowParams
 mkEscrowParams startTime p e =
   EscrowParams
-    { payee     = walletPubKeyHash w1
+    { payee     = mockWalletPaymentPubKeyHash w1
     , paying    = p
     , expecting = e
     , deadline  = startTime + 100000

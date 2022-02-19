@@ -181,17 +181,17 @@ params = theCampaign (TimeSlot.scSlotZeroTime def)
 deriving instance Eq (Action CrowdfundingModel)
 deriving instance Show (Action CrowdfundingModel)
 
-deriving instance Eq (ContractInstanceKey CrowdfundingModel w schema err)
-deriving instance Show (ContractInstanceKey CrowdfundingModel w schema err)
+deriving instance Eq (ContractInstanceKey CrowdfundingModel w schema err params)
+deriving instance Show (ContractInstanceKey CrowdfundingModel w schema err params)
 
 instance ContractModel CrowdfundingModel where
   data Action CrowdfundingModel = CContribute Wallet Value
                                 | CWaitUntil Slot
                                 | CStart
 
-  data ContractInstanceKey CrowdfundingModel w schema err where
-    ContributorKey :: Wallet -> ContractInstanceKey CrowdfundingModel () CrowdfundingSchema ContractError
-    OwnerKey :: Wallet -> ContractInstanceKey CrowdfundingModel () CrowdfundingSchema ContractError
+  data ContractInstanceKey CrowdfundingModel w schema err params where
+    ContributorKey :: Wallet -> ContractInstanceKey CrowdfundingModel () CrowdfundingSchema ContractError ()
+    OwnerKey :: Wallet -> ContractInstanceKey CrowdfundingModel () CrowdfundingSchema ContractError ()
 
   initialState = CrowdfundingModel { _contributions       = Map.empty
                                    , _ownerWallet         = w1
@@ -201,7 +201,15 @@ instance ContractModel CrowdfundingModel where
                                    , _endSlot             = TimeSlot.posixTimeToEnclosingSlot def $ campaignDeadline params
                                    }
 
-  perform h s a = case a of
+  initialInstances = StartContract (OwnerKey w1) () : [ StartContract (ContributorKey w) () | w <- contributorWallets ]
+
+  instanceWallet (OwnerKey w)       = w
+  instanceWallet (ContributorKey w) = w
+
+  instanceContract _ OwnerKey{}       _ = crowdfunding params
+  instanceContract _ ContributorKey{} _ = crowdfunding params
+
+  perform h _ s a = case a of
     CWaitUntil slot -> void $ Trace.waitUntilSlot slot
     CContribute w v -> Trace.callEndpoint @"contribute" (h $ ContributorKey w) Contribution{contribValue=v}
     CStart          -> Trace.callEndpoint @"schedule collection" (h $ OwnerKey $ s ^. contractState . ownerWallet) ()
@@ -212,7 +220,7 @@ instance ContractModel CrowdfundingModel where
       withdraw w v
       contributions $~ Map.insert w v
     CStart -> do
-      ownerOnline $= True
+      ownerOnline .= True
 
   nextReactiveState slot' = do
     -- If the owner is online and its after the
@@ -224,35 +232,26 @@ instance ContractModel CrowdfundingModel where
       owner   <- viewContractState ownerWallet
       cMap <- viewContractState contributions
       deposit owner (fold cMap)
-      contributions $= Map.empty
-      ownerOnline $= False
-      ownerContractDone $= True
+      contributions .= Map.empty
+      ownerOnline .= False
+      ownerContractDone .= True
     -- If its after the end of the collection time range
     -- the remaining funds are collected by the contracts
     collectDeadline <- viewContractState collectDeadlineSlot
     when (slot' >= collectDeadline) $ do
       cMap <- viewContractState contributions
       mapM_ (uncurry deposit) (Map.toList cMap)
-      contributions $= Map.empty
+      contributions .= Map.empty
 
   -- The 'precondition' says when a particular command is allowed.
   precondition s cmd = case cmd of
     CWaitUntil slot -> slot > s ^. currentSlot
     -- In order to contribute, we need to satisfy the constraint where each tx
     -- output must have at least N Ada.
-    --
-    -- We must make sure that we don't contribute a too high value such that:
-    --   - we can't pay for fees anymore
-    --   - have a tx output of less than N Ada.
-    --
-    -- We suppose the initial balance is 100 Ada. Needs to be changed if
-    -- the emulator initialises the wallets with a different value.
-    CContribute w v -> let currentWalletBalance = Ada.adaOf 100 + Ada.fromValue (s ^. balanceChange w)
-                        in w `notElem` Map.keys (s ^. contractState . contributions)
-                        && w /= (s ^. contractState . ownerWallet)
-                        && s ^. currentSlot < s ^. contractState . endSlot
-                        && Ada.fromValue v >= Ledger.minAdaTxOut
-                        && (currentWalletBalance - Ada.fromValue v) >= (Ledger.minAdaTxOut <> Ledger.maxFee)
+    CContribute w v -> w `notElem` Map.keys (s ^. contractState . contributions)
+                    && w /= (s ^. contractState . ownerWallet)
+                    && s ^. currentSlot < s ^. contractState . endSlot
+                    && Ada.fromValue v >= Ledger.minAdaTxOut
     CStart          -> Prelude.not (s ^. contractState . ownerOnline || s ^. contractState . ownerContractDone)
 
   -- To generate a random test case we need to know how to generate a random
@@ -280,9 +279,5 @@ instance ContractModel CrowdfundingModel where
 contributorWallets :: [Wallet]
 contributorWallets = [w2, w3, w4, w5, w6, w7, w8, w9, w10]
 
-handleSpecs :: [ContractInstanceSpec CrowdfundingModel]
-handleSpecs = ContractInstanceSpec (OwnerKey w1) w1 (crowdfunding params) :
-            [ ContractInstanceSpec (ContributorKey w) w (crowdfunding params) | w <- contributorWallets ]
-
 prop_Crowdfunding :: Actions CrowdfundingModel -> Property
-prop_Crowdfunding = propRunActions_ handleSpecs
+prop_Crowdfunding = propRunActions_

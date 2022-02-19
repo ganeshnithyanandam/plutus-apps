@@ -15,6 +15,7 @@
 {-# LANGUAGE TypeFamilies               #-}
 {-# LANGUAGE TypeOperators              #-}
 {-# options_ghc -fno-specialise         #-}
+{-# OPTIONS_GHC -g -fplugin-opt PlutusTx.Plugin:coverage-all #-}
 
 module Plutus.Contracts.Uniswap.OnChain
     ( mkUniswapValidator
@@ -178,8 +179,9 @@ validateRemove c lp liquidity ctx =
     traceIfFalse "pool state coin missing"             (isUnity inVal c)                              &&
     traceIfFalse "wrong liquidity pool output"         (fst lpLiquidity == lp)                        &&
     traceIfFalse "pool state coin missing from output" (isUnity outVal c)                             &&
-    traceIfFalse "liquidity tokens not burnt"          (txInfoMint info == negate (valueOf lC diff)) &&
-    traceIfFalse "non-positive liquidity"              (outA > 0 && outB > 0)
+    traceIfFalse "liquidity tokens not burnt"          (txInfoMint info == negate (valueOf lC diff))  &&
+    traceIfFalse "non-positive liquidity"              (outA > 0 && outB > 0)                         &&
+    traceIfFalse "removal of invalid amount of tokens" (outA' == outA && outB' == outB)
   where
     info :: TxInfo
     info = scriptContextTxInfo ctx
@@ -207,6 +209,8 @@ validateRemove c lp liquidity ctx =
     diff         = liquidity - snd lpLiquidity
     inA          = amountOf inVal $ lpCoinA lp
     inB          = amountOf inVal $ lpCoinB lp
+    outA'        = amountOf outVal $ lpCoinA lp
+    outB'        = amountOf outVal $ lpCoinB lp
     (outA, outB) = calculateRemoval inA inB liquidity diff
 
 {-# INLINABLE validateAdd #-}
@@ -290,5 +294,5 @@ validateLiquidityMinting Uniswap{..} tn _ ctx
     [_, _] -> True
     _      -> traceError "pool state minting without Uniswap input"
   where
-    lpC :: Coin Liquidity
+    lpC :: Coin PoolState
     lpC = mkCoin (ownCurrencySymbol ctx) tn

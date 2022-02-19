@@ -11,7 +11,7 @@
 module Cardano.Protocol.Socket.Mock.Server where
 
 import Cardano.BM.Data.Trace (Trace)
-import Cardano.Node.Types (MockServerLogMsg (..))
+import Cardano.Node.Types (PABServerLogMsg (..))
 import Data.ByteString.Lazy qualified as LBS
 import Data.List (intersect)
 import Data.Maybe (listToMaybe)
@@ -32,7 +32,7 @@ import Ouroboros.Network.Protocol.ChainSync.Server (ChainSyncServer (..), Server
 import Ouroboros.Network.Protocol.ChainSync.Server qualified as ChainSync
 import Ouroboros.Network.Protocol.LocalTxSubmission.Server qualified as TxSubmission
 import Ouroboros.Network.Protocol.LocalTxSubmission.Type qualified as TxSubmission
-import Plutus.PAB.Monitoring.Util qualified as LM
+import Plutus.Monitoring.Util qualified as LM
 
 import Cardano.Slotting.Slot (SlotNo (..), WithOrigin (..))
 import Ouroboros.Network.Block (Point (..), pointSlot)
@@ -144,7 +144,7 @@ pruneChain k original = do
 
 handleCommand ::
     MonadIO m
- => Trace IO MockServerLogMsg
+ => Trace IO PABServerLogMsg
  -> CommandChannel
  -> MVar MockNodeServerChainState
  -> SlotConfig
@@ -178,7 +178,7 @@ handleCommand trace CommandChannel {ccCommand, ccResponse} mvChainState slotCfg 
      used to control the server -}
 runServerNode ::
     MonadIO m
- => Trace IO MockServerLogMsg
+ => Trace IO PABServerLogMsg
  -> FilePath
  -> Integer
  -> MockNodeServerChainState

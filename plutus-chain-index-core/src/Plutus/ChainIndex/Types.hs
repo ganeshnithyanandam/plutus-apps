@@ -2,6 +2,7 @@
 {-# LANGUAGE DerivingVia       #-}
 {-# LANGUAGE NamedFieldPuns    #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE Strict            #-}
 {-# LANGUAGE TemplateHaskell   #-}
 {-# LANGUAGE TypeApplications  #-}
 {-| Misc. types used in this package
@@ -13,6 +14,8 @@ module Plutus.ChainIndex.Types(
     , Point(..)
     , pointsToTip
     , tipAsPoint
+    , _PointAtGenesis
+    , _Point
     , TxValidity(..)
     , TxStatus
     , TxOutStatus
@@ -32,20 +35,21 @@ module Plutus.ChainIndex.Types(
     , TxOutBalance(..)
     , tobUnspentOutputs
     , tobSpentOutputs
-    , BlockProcessOption(..)
+    , ChainSyncBlock(..)
+    , TxProcessOption(..)
     ) where
 
 import Codec.Serialise (Serialise)
 import Codec.Serialise qualified as CBOR
-import Control.Lens (makeLenses)
+import Control.Lens (makeLenses, makePrisms)
 import Control.Monad (void)
 import Crypto.Hash (SHA256, hash)
 import Data.Aeson (FromJSON, ToJSON)
 import Data.ByteArray qualified as BA
 import Data.ByteString.Lazy qualified as BSL
 import Data.Default (Default (..))
-import Data.Map (Map)
-import Data.Map qualified as Map
+import Data.Map.Strict (Map)
+import Data.Map.Strict qualified as Map
 import Data.Monoid (Last (..), Sum (..))
 import Data.OpenApi qualified as OpenApi
 import Data.Semigroup.Generic (GenericSemigroupMonoid (..))
@@ -54,20 +58,31 @@ import Data.Set qualified as Set
 import Data.Word (Word64)
 import GHC.Generics (Generic)
 import Ledger (TxOutRef (..))
-import Ledger.Blockchain (Block, BlockId (..))
+import Ledger.Blockchain (BlockId (..))
+import Ledger.Blockchain qualified as Ledger
 import Ledger.Slot (Slot)
 import Ledger.TxId (TxId)
 import PlutusTx.Lattice (MeetSemiLattice (..))
-import Prettyprinter (Pretty (..), (<+>))
+import Prettyprinter (Pretty (..), comma, (<+>))
 import Prettyprinter.Extras (PrettyShow (..))
 
+import Plutus.ChainIndex.Tx (ChainIndexTx)
+
 -- | Compute a hash of the block's contents.
-blockId :: Block -> BlockId
+blockId :: Ledger.Block -> BlockId
 blockId = BlockId
         . BA.convert
         . hash @_ @SHA256
         . BSL.toStrict
         . CBOR.serialise
+
+newtype BlockNumber = BlockNumber { unBlockNumber :: Word64 }
+    deriving stock (Eq, Ord, Show, Generic)
+    deriving newtype (Num, Real, Enum, Integral, ToJSON, FromJSON, OpenApi.ToSchema)
+
+instance Pretty BlockNumber where
+    pretty (BlockNumber blockNumber) =
+        "BlockNumber " <> pretty blockNumber
 
 -- | The tip of the chain index.
 data Tip =
@@ -91,6 +106,8 @@ data Point =
     deriving stock (Eq, Show, Generic)
     deriving anyclass (ToJSON, FromJSON)
 
+makePrisms ''Point
+
 instance Ord Point where
   PointAtGenesis <= _              = True
   _              <= PointAtGenesis = False
@@ -99,11 +116,11 @@ instance Ord Point where
 instance Pretty Point where
     pretty PointAtGenesis = "PointAtGenesis"
     pretty Point {pointSlot, pointBlockId} =
-            "Tip(slot="
-        <+> pretty pointSlot
-        <>  ", blockId="
-        <+> pretty pointBlockId
-        <>  ")"
+        "Point("
+     <> pretty pointSlot
+     <> comma
+     <+> pretty pointBlockId
+     <>  ")"
 
 tipAsPoint :: Tip -> Point
 tipAsPoint TipAtGenesis = PointAtGenesis
@@ -124,8 +141,15 @@ instance Semigroup Tip where
     t <> TipAtGenesis = t
     _ <> t            = t
 
+instance Semigroup Point where
+    t <> PointAtGenesis = t
+    _ <> t              = t
+
 instance Monoid Tip where
     mempty = TipAtGenesis
+
+instance Monoid Point where
+    mempty = PointAtGenesis
 
 instance Ord Tip where
     TipAtGenesis <= _            = True
@@ -135,11 +159,11 @@ instance Ord Tip where
 instance Pretty Tip where
     pretty TipAtGenesis = "TipAtGenesis"
     pretty Tip {tipSlot, tipBlockId, tipBlockNo} =
-            "Tip(slot="
-        <+> pretty tipSlot
-        <>  ", blockId="
+            "Tip("
+        <>  pretty tipSlot
+        <>  comma
         <+> pretty tipBlockId
-        <> ", blockNo="
+        <>  comma
         <+> pretty tipBlockNo
         <>  ")"
 
@@ -238,10 +262,6 @@ txOutStatusTxOutState (Committed _ s)              = Just s
 liftTxOutStatus :: TxOutStatus -> TxStatus
 liftTxOutStatus = void
 
-newtype BlockNumber = BlockNumber { unBlockNumber :: Word64 }
-    deriving stock (Eq, Ord, Show, Generic)
-    deriving newtype (Num, Real, Enum, Integral, Pretty, ToJSON, FromJSON, OpenApi.ToSchema)
-
 data Diagnostics =
     Diagnostics
         { numTransactions    :: Integer
@@ -295,7 +315,11 @@ data TxConfirmedState =
     , validity       :: Last TxValidity
     }
     deriving stock (Eq, Generic, Show)
-    deriving (Semigroup, Monoid) via (GenericSemigroupMonoid TxConfirmedState)
+    deriving (Monoid) via (GenericSemigroupMonoid TxConfirmedState)
+
+instance Semigroup TxConfirmedState where
+    (TxConfirmedState tc ba v) <> (TxConfirmedState tc' ba' v') =
+        TxConfirmedState (tc <> tc') (ba <> ba') (v <> v')
 
 -- | The effect of a transaction (or a number of them) on the tx output set.
 data TxOutBalance =
@@ -333,7 +357,6 @@ data TxUtxoBalance =
         deriving stock (Eq, Show, Generic)
         deriving anyclass (FromJSON, ToJSON, Serialise)
 
-
 makeLenses ''TxUtxoBalance
 
 instance Semigroup TxUtxoBalance where
@@ -349,17 +372,25 @@ instance Monoid TxUtxoBalance where
     mappend = (<>)
     mempty = TxUtxoBalance mempty mempty
 
--- | User-customizable options to process a block.
+
+-- | User-customizable options to process a transaction.
 -- See #73 for more motivations.
-newtype BlockProcessOption =
-  BlockProcessOption
-    { bpoStoreTxs :: Bool
-    -- ^ Should the chain index store this batch of transactions or not.
-    -- If not, only handle the tip and UTXOs.
+newtype TxProcessOption = TxProcessOption
+    { tpoStoreTx :: Bool
+    -- ^ Should the chain index store this transaction or not.
+    -- If not, only handle the UTXOs.
     -- This, for example, allows applications to skip unwanted pre-Alonzo transactions.
     }
+    deriving (Show)
 
 -- We should think twice when setting the default option.
 -- For now, it should store all data to avoid weird non-backward-compatible bugs in the future.
-instance Default BlockProcessOption where
-  def = BlockProcessOption True
+instance Default TxProcessOption where
+    def = TxProcessOption { tpoStoreTx = True }
+
+-- | A block of transactions to be synced.
+data ChainSyncBlock = Block
+    { blockTip :: Tip
+    , blockTxs :: [(ChainIndexTx, TxProcessOption)]
+    }
+    deriving (Show)

@@ -4,24 +4,24 @@
 {-# LANGUAGE MonoLocalBinds     #-}
 module Plutus.Contract(
       Contract(..)
-    , ContractError(..)
-    , AsContractError(..)
-    , IsContract(..)
+    , Plutus.Contract.Types.ContractError(..)
+    , Plutus.Contract.Types.AsContractError(..)
+    , Plutus.Contract.Types.IsContract(..)
     , (>>)
-    , throwError
-    , handleError
-    , mapError
-    , runError
+    , Plutus.Contract.Types.throwError
+    , Plutus.Contract.Types.handleError
+    , Plutus.Contract.Types.mapError
+    , Plutus.Contract.Types.runError
     -- * Select
     , Promise
-    , awaitPromise
-    , promiseMap
-    , promiseBind
+    , Plutus.Contract.Types.awaitPromise
+    , Plutus.Contract.Types.promiseMap
+    , Plutus.Contract.Types.promiseBind
     , both
-    , selectEither
-    , select
-    , selectList
-    , never
+    , Plutus.Contract.Types.selectEither
+    , Plutus.Contract.Types.select
+    , Plutus.Contract.Types.selectList
+    , Plutus.Contract.Types.never
     -- * Dealing with time
     , Request.awaitSlot
     , Request.isSlot
@@ -63,7 +63,7 @@ module Plutus.Contract(
     , Request.utxosTxOutTxFromTx
     , Request.getTip
     -- * Wallet's own public key
-    , Request.ownPubKeyHash
+    , Request.ownPaymentPubKeyHash
     -- * Contract instance Id
     , Wallet.Types.ContractInstanceId
     , Request.ownInstanceId
@@ -90,15 +90,12 @@ module Plutus.Contract(
     -- ** Tx output confirmation
     , Request.awaitTxOutStatusChange
     -- * Checkpoints
-    , checkpoint
-    , checkpointLoop
-    , AsCheckpointError(..)
-    , CheckpointError(..)
+    , Plutus.Contract.Types.checkpoint
+    , Plutus.Contract.Types.checkpointLoop
+    , Plutus.Contract.Types.AsCheckpointError(..)
+    , Plutus.Contract.Types.CheckpointError(..)
     -- * Logging
-    , logDebug
-    , logInfo
-    , logWarn
-    , logError
+    , module Logging
     -- * Row-related things
     , HasType
     , ContractRow
@@ -106,44 +103,24 @@ module Plutus.Contract(
     , type Empty
     ) where
 
-import Data.Aeson (ToJSON (toJSON))
 import Data.Row (Empty, HasType, type (.\/))
 
+import Plutus.Contract.Logging as Logging
 import Plutus.Contract.Request (ContractRow)
 import Plutus.Contract.Request qualified as Request
 import Plutus.Contract.Schema qualified as Schema
 import Plutus.Contract.Typed.Tx as Tx (collectFromScript, collectFromScriptFilter)
-import Plutus.Contract.Types (AsCheckpointError (..), AsContractError (..), CheckpointError (..), Contract (..),
-                              ContractError (..), IsContract (..), Promise (..), checkpoint, checkpointLoop,
-                              handleError, mapError, never, promiseBind, promiseMap, runError, select, selectEither,
-                              selectList, throwError)
+import Plutus.Contract.Types (Contract (Contract), Promise, select)
+import Plutus.Contract.Types qualified
 
-import Control.Monad.Freer.Extras.Log qualified as L
 import Control.Monad.Freer.Writer qualified as W
 import Data.Functor.Apply (liftF2)
-import Prelude
 import Wallet.API (WalletAPIError)
 import Wallet.Types qualified
 
 -- | Execute both contracts in any order
 both :: Promise w s e a -> Promise w s e b -> Promise w s e (a, b)
 both a b = liftF2 (,) a b `select` liftF2 (flip (,)) b a
-
--- | Log a message at the 'Debug' level
-logDebug :: ToJSON a => a -> Contract w s e ()
-logDebug = Contract . L.logDebug . toJSON
-
--- | Log a message at the 'Info' level
-logInfo :: ToJSON a => a -> Contract w s e ()
-logInfo = Contract . L.logInfo . toJSON
-
--- | Log a message at the 'Warning' level
-logWarn :: ToJSON a => a -> Contract w s e ()
-logWarn = Contract . L.logWarn . toJSON
-
--- | Log a message at the 'Error' level
-logError :: ToJSON a => a -> Contract w s e ()
-logError = Contract . L.logError . toJSON
 
 -- | Update the contract's accumulating state @w@
 tell :: w -> Contract w s e ()

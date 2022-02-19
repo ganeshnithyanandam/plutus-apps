@@ -13,7 +13,6 @@ module Spec.SealedBidAuction where
 import Cardano.Crypto.Hash as Crypto
 import Control.Lens hiding (elements)
 import Control.Monad (void, when)
-import Control.Monad.Freer.Extras.Log (LogLevel (..))
 import Data.Default (Default (def))
 
 import Ledger (Slot (..), Value)
@@ -37,7 +36,7 @@ instance Arbitrary AuctionParams where
     endTime    <- choose (20, 50)
     payoutTime <- choose (endTime+1, 70)
     return $ AuctionParams
-              { apOwner      = walletPubKeyHash w1
+              { apOwner      = mockWalletPaymentPubKeyHash w1
               , apAsset      = theToken
               , apEndTime    = TimeSlot.scSlotZeroTime def + fromInteger (endTime*1000)
               , apPayoutTime = TimeSlot.scSlotZeroTime def + fromInteger (payoutTime*1000)
@@ -50,15 +49,10 @@ theToken = Value.singleton mpsHash "token" 1
 mpsHash :: Value.CurrencySymbol
 mpsHash = Value.CurrencySymbol $ PlutusTx.toBuiltin $ Crypto.hashToBytes $ Crypto.hashWith @Crypto.Blake2b_256 id "ffff"
 
--- | 'EmulatorConfig' that includes 'theToken' in the initial distribution of Wallet 1.
-auctionEmulatorCfg :: Trace.EmulatorConfig
-auctionEmulatorCfg =
-    let initialDistribution = defaultDist & over (ix w1) ((<>) theToken)
-    in (def & Trace.initialChainState .~ Left initialDistribution) & Trace.slotConfig .~ def
-
--- | 'CheckOptions' that includes our own 'auctionEmulatorCfg'.
+-- | 'CheckOptions' that includes 'theToken' in the initial distribution of Wallet 1.
 options :: CheckOptions
-options = set emulatorConfig auctionEmulatorCfg defaultCheckOptions
+options = defaultCheckOptionsContractModel
+    & changeInitialWalletValue w1 ((<>) theToken)
 
 -- * QuickCheck model
 
@@ -75,14 +69,14 @@ data Phase = NotStarted | Bidding | AwaitingPayout | PayoutTime | AuctionOver
 
 makeLenses 'AuctionModel
 
-deriving instance Eq (ContractInstanceKey AuctionModel w s e)
-deriving instance Show (ContractInstanceKey AuctionModel w s e)
+deriving instance Eq (ContractInstanceKey AuctionModel w s e params)
+deriving instance Show (ContractInstanceKey AuctionModel w s e params)
 
 instance ContractModel AuctionModel where
 
-    data ContractInstanceKey AuctionModel w s e where
-        SellerH :: ContractInstanceKey AuctionModel () SellerSchema AuctionError
-        BidderH :: Wallet -> ContractInstanceKey AuctionModel () BidderSchema AuctionError
+    data ContractInstanceKey AuctionModel w s e params where
+        SellerH :: ContractInstanceKey AuctionModel () SellerSchema AuctionError AuctionParams
+        BidderH :: Wallet -> ContractInstanceKey AuctionModel () BidderSchema AuctionError AuctionParams
 
     data Action AuctionModel = Init AuctionParams | Bid Wallet Integer | WaitUntil Slot | Reveal Wallet Integer | Payout Wallet
         deriving (Eq, Show)
@@ -95,18 +89,32 @@ instance ContractModel AuctionModel where
         , _phase             = NotStarted
         }
 
+    initialInstances = []
+
+    startInstances _ (Init params) = StartContract SellerH params : [ StartContract (BidderH w) params | w <- [w2, w3, w4] ]
+    startInstances _ _             = []
+
+    instanceWallet SellerH     = w1
+    instanceWallet (BidderH w) = w
+
+    instanceContract _ SellerH   params = sellerContract params
+    instanceContract _ BidderH{} params = bidderContract params
+
     arbitraryAction s
         | p /= NotStarted =
-            frequency [ (1, WaitUntil . step <$> choose (1, 3 :: Integer))
+            frequency$[ (1, WaitUntil . step <$> choose (1, 3 :: Integer))
                       , (5, pure (WaitUntil $ s ^. contractState . endBidSlot))
                       , (5, pure (WaitUntil $ s ^. contractState . payoutSlot))
                       , (40, Bid  <$> elements [w2, w3, w4] <*> choose (Ada.getLovelace Ledger.minAdaTxOut, 100_000_000))
                       -- Random reveal
                       , (20, Reveal <$> elements [w2, w3, w4] <*> choose (Ada.getLovelace Ledger.minAdaTxOut, 100_000_000))
+                      ] ++
                       -- Correct reveal
-                      , (20, uncurry Reveal <$> elements [ (w,i) | (i,w) <- s ^. contractState . currentBids ])
-                      , (20, Payout <$> elements [w1, w2, w3, w4]) ]
-        | otherwise = Init <$> arbitrary
+                      [ (20, uncurry Reveal <$> elements [ (w,i) | (i,w) <- s ^. contractState . currentBids ])
+                      | not (null (s ^. contractState . currentBids))
+                      ] ++
+                      [ (20, Payout <$> elements [w1, w2, w3, w4]) ]
+        | otherwise = oneof [Init <$> arbitrary]
         where
             p    = s ^. contractState . phase
             slot = s ^. currentSlot
@@ -118,29 +126,24 @@ instance ContractModel AuctionModel where
 
             WaitUntil slot -> slot > s ^. currentSlot
 
-            Bid w v        -> let currentWalletBalance = Ada.adaOf 100 + Ada.fromValue (s ^. balanceChange w)
-                               in s ^. contractState . phase == Bidding
-                                  && w `notElem` fmap snd (s ^. contractState . currentBids)
-                                  && v >= Ada.getLovelace Ledger.minAdaTxOut
-                                  && currentWalletBalance - Ada.lovelaceOf v >= Ledger.minAdaTxOut <> Ledger.maxFee
+            Bid w v        -> s ^. contractState . phase == Bidding
+                           && w `notElem` fmap snd (s ^. contractState . currentBids)
+                           && v >= Ada.getLovelace Ledger.minAdaTxOut
 
-            Reveal w v     -> let currentWalletBalance = Ada.adaOf 100 + Ada.fromValue (s ^. balanceChange w)
-                               in s ^. contractState . phase == AwaitingPayout
-                                  && w `elem` fmap snd (s ^. contractState . currentBids)
-                                  && v >= Ada.getLovelace Ledger.minAdaTxOut
-                                  && currentWalletBalance - Ada.lovelaceOf v >= Ledger.minAdaTxOut <> Ledger.maxFee
+            Reveal _ v     -> s ^. contractState . phase == AwaitingPayout
+                           && v >= Ada.getLovelace Ledger.minAdaTxOut
 
             Payout _       -> s ^. contractState . phase == PayoutTime
 
-    perform _ _ (Init _)            = delay 3
-    perform _ _ (WaitUntil slot)    = void $ Trace.waitUntilSlot slot
-    perform handle _ (Bid w bid)    = do
+    perform _ _ _ (Init _)          = delay 3
+    perform _ _ _ (WaitUntil slot)  = void $ Trace.waitUntilSlot slot
+    perform handle _ _ (Bid w bid)  = do
         Trace.callEndpoint @"bid" (handle $ BidderH w) (BidArgs (secretArg bid))
         delay 1
-    perform handle _ (Reveal w bid) = do
+    perform handle _ _ (Reveal w bid) = do
         Trace.callEndpoint @"reveal" (handle $ BidderH w) (RevealArgs bid)
         delay 1
-    perform handle _ (Payout w)
+    perform handle _ _ (Payout w)
       | w == w1 = do
         Trace.callEndpoint @"payout" (handle SellerH) ()
         delay 1
@@ -155,6 +158,11 @@ instance ContractModel AuctionModel where
         WaitUntil (s ^. currentSlot + 1) : [ Reveal w v' | v' <- shrink v ]
     shrinkAction _ _ = []
 
+    monitoring (s,_) (Reveal w bid)
+      | (bid,w) `elem` bids   = tabulate "Reveals" ["honest"]
+      | w `elem` map snd bids = tabulate "Reveals" ["dishonest"]
+      | otherwise             = tabulate "Reveals" ["no bid"]
+      where bids = s ^. contractState . currentBids
     monitoring _ _ = id
 
     -- This command is only for setting up the model state with theToken
@@ -163,10 +171,10 @@ instance ContractModel AuctionModel where
         currentPhase <- viewContractState phase
         case cmd of
             Init params -> do
-                phase $= Bidding
+                endBidSlot .= TimeSlot.posixTimeToEnclosingSlot def (apEndTime params)
+                payoutSlot .= TimeSlot.posixTimeToEnclosingSlot def (apPayoutTime params)
                 withdraw w1 $ Ada.toValue Ledger.minAdaTxOut <> theToken
-                endBidSlot $= TimeSlot.posixTimeToEnclosingSlot def (apEndTime params)
-                payoutSlot $= TimeSlot.posixTimeToEnclosingSlot def (apPayoutTime params)
+                phase .= Bidding
                 wait 3
 
             WaitUntil slot' -> do
@@ -186,11 +194,11 @@ instance ContractModel AuctionModel where
                     when ((bid, w) `elem` bids && bid > oldBid) $ do
                       withdraw w $ Ada.lovelaceValueOf bid
                       deposit w' $ Ada.lovelaceValueOf oldBid
-                      currentWinningBid $= Just (bid, w)
+                      currentWinningBid .= Just (bid, w)
                   Nothing ->
                     when ((bid, w) `elem` bids) $ do
                       withdraw w $ Ada.lovelaceValueOf bid
-                      currentWinningBid $= Just (bid, w)
+                      currentWinningBid .= Just (bid, w)
                 wait 1
 
             Payout _ | currentPhase == PayoutTime -> do
@@ -210,35 +218,46 @@ instance ContractModel AuctionModel where
       where
         updatePhase = do
           currentPhase <- viewContractState phase
-          when (currentPhase /= AuctionOver) $ do
+          when (currentPhase `notElem` [NotStarted, AuctionOver]) $ do
             slot       <- viewModelState currentSlot
             eSlot      <- viewContractState endBidSlot
             pSlot <- viewContractState payoutSlot
             when (slot >= eSlot) $ do
-              phase $= AwaitingPayout
+              phase .= AwaitingPayout
             when (slot >= pSlot) $ do
-              phase $= PayoutTime
+              phase .= PayoutTime
 
-delay :: Integer -> Trace.EmulatorTrace ()
-delay n = void $ Trace.waitNSlots $ fromIntegral n
+prop_Auction :: Actions AuctionModel -> Property
+prop_Auction = propRunActionsWithOptions options defaultCoverageOptions (\ _ -> pure True)
 
-prop_Auction :: DL AuctionModel () -> Property
-prop_Auction script =
-    forAll arbitrary $ \params ->
-      forAllDL (action (Init params) >> script) $ \actions ->
-        propRunActionsWithOptions (set minLogLevel Info options) defaultCoverageOptions (spec params)
-          (\ _ -> pure True)  -- TODO: check termination
-          actions
-    where
-        spec params = ContractInstanceSpec SellerH w1 (sellerContract params) :
-                      [ ContractInstanceSpec (BidderH w) w (bidderContract params) | w <- [w2, w3, w4] ]
+finishAuction :: DL AuctionModel ()
+finishAuction = do
+    anyActions_
+    finishingStrategy w1
+    assertModel "Locked funds are not zero" (symIsZero . lockedValue)
 
-prop_AuctionModelCorrect :: Property
-prop_AuctionModelCorrect = prop_Auction anyActions_
+finishingStrategy :: Wallet -> DL AuctionModel ()
+finishingStrategy w = do
+    slot <- viewModelState currentSlot
+    payday <- viewContractState payoutSlot
+    when (slot < payday) $ action $ WaitUntil $ payday
+    currentPhase <- viewContractState phase
+    when (currentPhase == PayoutTime) $ action $ Payout w
+
+prop_FinishAuction :: Property
+prop_FinishAuction = forAllDL finishAuction prop_Auction
+
+noLockProof :: NoLockedFundsProof AuctionModel
+noLockProof = defaultNLFP
+  { nlfpMainStrategy   = finishingStrategy w1
+  , nlfpWalletStrategy = finishingStrategy }
+
+prop_NoLockedFunds :: Property
+prop_NoLockedFunds = checkNoLockedFundsProof options noLockProof
 
 tests :: TestTree
 tests =
   testGroup "sealed bid auction"
     [ testProperty "packInteger is injective" $ \x y -> x /= y ==> packInteger x /= packInteger y
-    , testProperty "prop_AuctionModelCorrect" $ withMaxSuccess 20 prop_AuctionModelCorrect
+    , testProperty "prop_AuctionModelCorrect" $ withMaxSuccess 20 prop_Auction
     ]

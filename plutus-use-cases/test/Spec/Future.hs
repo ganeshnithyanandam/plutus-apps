@@ -23,7 +23,7 @@ import Spec.TokenAccount (assertAccountBalance)
 
 import Ledger qualified
 import Ledger.Ada qualified as Ada
-import Ledger.Crypto (PrivateKey, PubKey (..))
+import Ledger.Address (PaymentPrivateKey, PaymentPubKey)
 import Ledger.Time (POSIXTime)
 import Ledger.TimeSlot qualified as TimeSlot
 import Ledger.Value (Value, scale)
@@ -43,14 +43,11 @@ import Wallet.Emulator.Folds qualified as Folds
 import Wallet.Emulator.Stream qualified as Stream
 import Wallet.Emulator.Wallet qualified as Wallet
 
-futureEmulatorCfg :: Trace.EmulatorConfig
-futureEmulatorCfg =
-    let initialDistribution = fmap (const $ Ada.lovelaceValueOf 1_000_000_000) defaultDist
-    in def & Trace.initialChainState .~ Left initialDistribution
-
--- | 'CheckOptions' that includes our own 'auctionEmulatorCfg'.
+-- | 'CheckOptions' that assigns 1000 Ada to Wallets 1 and 2.
 options :: CheckOptions
-options = set emulatorConfig futureEmulatorCfg defaultCheckOptions
+options = defaultCheckOptions
+    & changeInitialWalletValue w1 (const $ Ada.adaValueOf 1000)
+    & changeInitialWalletValue w2 (const $ Ada.adaValueOf 1000)
 
 tests :: TestTree
 tests =
@@ -99,8 +96,8 @@ tests =
 setup :: POSIXTime -> FutureSetup
 setup startTime =
     FutureSetup
-        { shortPK = walletPubKeyHash w1
-        , longPK = walletPubKeyHash w2
+        { shortPK = mockWalletPaymentPubKeyHash w1
+        , longPK = mockWalletPaymentPubKeyHash w2
         , contractStart = startTime + 15000
         }
 
@@ -182,8 +179,8 @@ forwardPrice = Ada.lovelaceValueOf 2_123_000
 units :: Integer
 units = 187
 
-oracleKeys :: (PrivateKey, PubKey)
-oracleKeys = (CW.privateKey wllt, CW.pubKey wllt) where
+oracleKeys :: (PaymentPrivateKey, PaymentPubKey)
+oracleKeys = (CW.paymentPrivateKey wllt, CW.paymentPubKey wllt) where
     wllt = CW.fromWalletNumber $ CW.WalletNumber 10
 
 -- | Increase the margin of the 'Long' role by 100 lovelace
@@ -203,7 +200,7 @@ settleEarly hdl = do
     void $ Trace.waitNSlots 1
 
 mkSignedMessage :: POSIXTime -> Value -> SignedMessage (Observation Value)
-mkSignedMessage time vl = Oracle.signObservation time vl (fst oracleKeys)
+mkSignedMessage time vl = Oracle.signObservation' time vl (Ledger.unPaymentPrivateKey $ fst oracleKeys)
 
 testAccounts :: FutureAccounts
 testAccounts =
@@ -217,5 +214,5 @@ testAccounts =
         $ Freer.runError @Folds.EmulatorFoldErr
         $ Stream.foldEmulatorStreamM fld
         $ Stream.takeUntilSlot 10
-        $ Trace.runEmulatorStream futureEmulatorCfg F.setupTokensTrace
+        $ Trace.runEmulatorStream (view emulatorConfig options) F.setupTokensTrace
 

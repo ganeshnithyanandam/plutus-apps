@@ -9,7 +9,7 @@
 {-# LANGUAGE TypeFamilies       #-}
 module Spec.Auction
     ( tests
-    , auctionEmulatorCfg
+    , options
     , auctionTrace1
     , auctionTrace2
     , prop_Auction
@@ -54,7 +54,7 @@ slotCfg = def
 params :: AuctionParams
 params =
     AuctionParams
-        { apOwner   = walletPubKeyHash w1
+        { apOwner   = mockWalletPaymentPubKeyHash w1
         , apAsset   = theToken
         , apEndTime = TimeSlot.scSlotZeroTime slotCfg + 100000
         }
@@ -68,15 +68,10 @@ theToken =
     -- This currency is created by the initial transaction.
     Value.singleton mpsHash "token" 1
 
--- | 'EmulatorConfig' that includes 'theToken' in the initial distribution of Wallet 1.
-auctionEmulatorCfg :: Trace.EmulatorConfig
-auctionEmulatorCfg =
-    let initialDistribution = defaultDist & over (ix w1) ((<>) theToken)
-    in (def & Trace.initialChainState .~ Left initialDistribution) & Trace.slotConfig .~ slotCfg
-
--- | 'CheckOptions' that includes our own 'auctionEmulatorCfg'.
+-- | 'CheckOptions' that includes 'theToken' in the initial distribution of Wallet 1.
 options :: CheckOptions
-options = set emulatorConfig auctionEmulatorCfg defaultCheckOptions
+options = defaultCheckOptionsContractModel
+    & changeInitialWalletValue w1 ((<>) theToken)
 
 seller :: Contract AuctionOutput SellerSchema AuctionError ()
 seller = auctionSeller (apAsset params) (apEndTime params)
@@ -90,10 +85,10 @@ trace1WinningBid = Ada.adaOf 50
 auctionTrace1 :: Trace.EmulatorTrace ()
 auctionTrace1 = do
     sellerHdl <- Trace.activateContractWallet w1 seller
-    _ <- Trace.waitNSlots 3
+    void $ Trace.waitNSlots 3
     currency <- extractAssetClass sellerHdl
     hdl2 <- Trace.activateContractWallet w2 (buyer currency)
-    _ <- Trace.waitNSlots 1
+    void $ Trace.waitNSlots 1
     Trace.callEndpoint @"bid" hdl2 trace1WinningBid
     void $ Trace.waitUntilTime $ apEndTime params
     void $ Trace.waitNSlots 1
@@ -111,15 +106,15 @@ extractAssetClass handle = do
 auctionTrace2 :: Trace.EmulatorTrace ()
 auctionTrace2 = do
     sellerHdl <- Trace.activateContractWallet w1 seller
-    _ <- Trace.waitNSlots 3
+    void $ Trace.waitNSlots 3
     currency <- extractAssetClass sellerHdl
     hdl2 <- Trace.activateContractWallet w2 (buyer currency)
     hdl3 <- Trace.activateContractWallet w3 (buyer currency)
-    _ <- Trace.waitNSlots 1
+    void $ Trace.waitNSlots 1
     Trace.callEndpoint @"bid" hdl2 (Ada.adaOf 50)
-    _ <- Trace.waitNSlots 15
+    void $ Trace.waitNSlots 15
     Trace.callEndpoint @"bid" hdl3 (Ada.adaOf 60)
-    _ <- Trace.waitNSlots 35
+    void $ Trace.waitNSlots 35
     Trace.callEndpoint @"bid" hdl2 trace2WinningBid
     void $ Trace.waitUntilTime $ apEndTime params
     void $ Trace.waitNSlots 1
@@ -129,7 +124,7 @@ trace1FinalState =
     AuctionOutput
         { auctionState = Last $ Just $ Finished $ HighestBid
             { highestBid = trace1WinningBid
-            , highestBidder = walletPubKeyHash w2
+            , highestBidder = mockWalletPaymentPubKeyHash w2
             }
         , auctionThreadToken = Last $ Just threadToken
         }
@@ -139,7 +134,7 @@ trace2FinalState =
     AuctionOutput
         { auctionState = Last $ Just $ Finished $ HighestBid
             { highestBid = trace2WinningBid
-            , highestBidder = walletPubKeyHash w2
+            , highestBidder = mockWalletPaymentPubKeyHash w2
             }
         , auctionThreadToken = Last $ Just threadToken
         }
@@ -175,16 +170,16 @@ data Phase = NotStarted | Bidding | AuctionOver
 
 makeLenses 'AuctionModel
 
-deriving instance Eq (ContractInstanceKey AuctionModel w s e)
-deriving instance Show (ContractInstanceKey AuctionModel w s e)
+deriving instance Eq (ContractInstanceKey AuctionModel w s e params)
+deriving instance Show (ContractInstanceKey AuctionModel w s e params)
 
 instance ContractModel AuctionModel where
 
-    data ContractInstanceKey AuctionModel w s e where
-        SellerH :: ContractInstanceKey AuctionModel AuctionOutput SellerSchema AuctionError
-        BuyerH  :: Wallet -> ContractInstanceKey AuctionModel AuctionOutput BuyerSchema AuctionError
+    data ContractInstanceKey AuctionModel w s e params where
+        SellerH :: ContractInstanceKey AuctionModel AuctionOutput SellerSchema AuctionError ()
+        BuyerH  :: Wallet -> ContractInstanceKey AuctionModel AuctionOutput BuyerSchema AuctionError ()
 
-    data Action AuctionModel = Init | Bid Wallet Integer | WaitUntil Slot
+    data Action AuctionModel = Init Wallet | Bid Wallet Integer | WaitUntil Slot
         deriving (Eq, Show)
 
     initialState = AuctionModel
@@ -194,36 +189,36 @@ instance ContractModel AuctionModel where
         , _phase      = NotStarted
         }
 
+    initialInstances = StartContract SellerH () : [ StartContract (BuyerH w) () | w <- [w2, w3, w4] ]
+
+    instanceWallet SellerH    = w1
+    instanceWallet (BuyerH w) = w
+
+    instanceContract _ SellerH  _ = seller
+    instanceContract _ BuyerH{} _ = buyer threadToken
+
     arbitraryAction s
         | p /= NotStarted =
-            oneof [ WaitUntil . step <$> choose (1, 10 :: Integer)
-                  , Bid  <$> elements [w2, w3, w4] <*> choose (Ada.getLovelace Ledger.minAdaTxOut, 100_000_000) ]
-        | otherwise = pure Init
+            frequency $  [ (1, WaitUntil . step <$> choose (1, 10 :: Integer)) ]
+                      ++ [ (3, Bid w <$> chooseBid (lo,hi))
+                         | w <- [w2, w3, w4]
+                         , let (lo,hi) = validBidRange s w
+                         , lo <= hi ]
+        | otherwise = pure $ Init w1
         where
             p    = s ^. contractState . phase
             slot = s ^. currentSlot
             step n = slot + fromIntegral n
 
-    precondition s Init = s ^. contractState . phase == NotStarted
-    precondition s cmd  = s ^. contractState . phase /= NotStarted &&
+    precondition s (Init _) = s ^. contractState . phase == NotStarted
+    precondition s cmd      = s ^. contractState . phase /= NotStarted &&
         case cmd of
             WaitUntil slot -> slot > s ^. currentSlot
 
             -- In order to place a bid, we need to satisfy the constraint where
             -- each tx output must have at least N Ada.
-            --
-            -- When we bid, we must make sure that we don't bid too high such
-            -- that:
-            --     - we can't pay for fees anymore
-            --     - we have a tx output of less than N Ada.
-            --
-            -- We suppose the initial balance is 100 Ada. Needs to be changed if
-            -- the emulator initialises the wallets with a different value.
-            Bid w bid      -> let currentWalletBalance = Ada.adaOf 100 + Ada.fromValue (s ^. balanceChange w)
-                                  current = s ^. contractState . currentBid
-                               in    bid > current
-                                  && bid >= Ada.getLovelace Ledger.minAdaTxOut
-                                  && currentWalletBalance - Ada.lovelaceOf bid >= (Ledger.minAdaTxOut <> Ledger.maxFee)
+            Bid w bid      -> let (lo,hi) = validBidRange s w in
+                              lo <= bid && bid <= hi
             _              -> True
 
     nextReactiveState slot' = do
@@ -232,7 +227,7 @@ instance ContractModel AuctionModel where
       when (slot' >= end && p == Bidding) $ do
         w   <- viewContractState winner
         bid <- viewContractState currentBid
-        phase $= AuctionOver
+        phase .= AuctionOver
         deposit w $ Ada.toValue Ledger.minAdaTxOut <> theToken
         deposit w1 $ Ada.lovelaceValueOf bid
 
@@ -241,8 +236,8 @@ instance ContractModel AuctionModel where
         slot <- viewModelState currentSlot
         end  <- viewContractState endSlot
         case cmd of
-            Init -> do
-                phase $= Bidding
+            Init _ -> do
+                phase .= Bidding
                 withdraw w1 $ Ada.toValue Ledger.minAdaTxOut <> theToken
                 wait 3
             WaitUntil slot' -> waitUntil slot'
@@ -252,12 +247,13 @@ instance ContractModel AuctionModel where
                 when (slot < end) $ do
                     withdraw w $ Ada.lovelaceValueOf bid
                     deposit leader $ Ada.lovelaceValueOf current
-                    currentBid $= bid
-                    winner     $= w
+                    currentBid .= bid
+                    winner     .= w
+                wait 2
 
-    perform _ _ Init = delay 3
-    perform _ _ (WaitUntil slot) = void $ Trace.waitUntilSlot slot
-    perform handle _ (Bid w bid) = do
+    perform _ _ _ (Init _) = delay 3
+    perform _ _ _ (WaitUntil slot) = void $ Trace.waitUntilSlot slot
+    perform handle _ _ (Bid w bid) = do
         -- FIXME: You cannot bid in certain slots when the off-chain code is busy, so to make the
         --        tests pass we send two identical bids in consecutive slots. The off-chain code is
         --        never busy for more than one slot at a time so at least one of the bids is
@@ -268,33 +264,56 @@ instance ContractModel AuctionModel where
         Trace.callEndpoint @"bid" (handle $ BuyerH w) (Ada.lovelaceOf bid)
         delay 1
 
-    shrinkAction _ Init      = []
+    shrinkAction _ (Init _)  = []
     shrinkAction _ (WaitUntil (Slot n))  = [ WaitUntil (Slot n') | n' <- shrink n ]
     shrinkAction s (Bid w v) =
         WaitUntil (s ^. currentSlot + 1) : [ Bid w v' | v' <- shrink v ]
 
+    monitoring _ (Bid _ bid) =
+      classify (Ada.lovelaceOf bid == Ada.adaOf 100 - (Ledger.minAdaTxOut <> Ledger.maxFee))
+        "Maximum bid reached"
     monitoring _ _ = id
 
-delay :: Integer -> Trace.EmulatorTrace ()
-delay n = void $ Trace.waitNSlots $ fromIntegral n
+-- In order to place a bid, we need to satisfy the constraint where
+-- each tx output must have at least N Ada.
+--
+-- When we bid, we must make sure that we don't bid too high such
+-- that:
+--     - we can't pay for fees anymore
+--     - we have a tx output of less than N Ada.
+--
+-- We suppose the initial balance is 100 Ada. Needs to be changed if
+-- the emulator initialises the wallets with a different value.
+validBidRange :: ModelState AuctionModel -> Wallet -> (Integer,Integer)
+validBidRange s _w =
+  let currentWalletBalance = Ada.adaOf 100  -- this is approximate
+      current = s ^. contractState . currentBid
+  in ( (current+1) `max` Ada.getLovelace Ledger.minAdaTxOut,
+       Ada.getLovelace (currentWalletBalance - (Ledger.minAdaTxOut <> Ledger.maxFee))
+     )
+
+-- When we choose a bid, we prefer a lower bid to a higher
+-- one. Otherwise longer tests very often reach the maximum possible
+-- bid, which makes little sense.
+chooseBid :: (Integer,Integer) -> Gen Integer
+chooseBid (lo,hi)
+  | lo==hi = pure lo
+  | lo <hi = oneof [choose (lo,lo+k) | k <- takeWhile (>0) (iterate (`div` 400) (hi-lo))]
+  | otherwise = error $ "chooseBid "++show (lo,hi)
 
 prop_Auction :: Actions AuctionModel -> Property
 prop_Auction script =
-    propRunActionsWithOptions (set minLogLevel Info options) defaultCoverageOptions handleSpec
+    propRunActionsWithOptions (set minLogLevel Info options) defaultCoverageOptions
         (\ _ -> pure True)  -- TODO: check termination
         script
 
-handleSpec :: [ContractInstanceSpec AuctionModel]
-handleSpec = ContractInstanceSpec SellerH w1 seller :
-             [ ContractInstanceSpec (BuyerH w) w (buyer threadToken) | w <- [w2, w3, w4] ]
-
 finishAuction :: DL AuctionModel ()
 finishAuction = do
-    action Init
+    action $ Init w1
     anyActions_
     slot <- viewModelState currentSlot
     when (slot < 101) $ action $ WaitUntil 101
-    assertModel "Locked funds are not zero" (Value.isZero . lockedValue)
+    assertModel "Locked funds are not zero" (symIsZero . lockedValue)
 
 prop_FinishAuction :: Property
 prop_FinishAuction = forAllDL finishAuction prop_Auction
@@ -303,18 +322,18 @@ prop_FinishAuction = forAllDL finishAuction prop_Auction
 --   seller walks away the buyer will not get their token (unless going around the off-chain code
 --   and building a Payout transaction manually).
 noLockProof :: NoLockedFundsProof AuctionModel
-noLockProof = NoLockedFundsProof
+noLockProof = defaultNLFP
   { nlfpMainStrategy   = strat
   , nlfpWalletStrategy = const strat }
   where
     strat = do
       p <- viewContractState phase
-      when (p == NotStarted) $ action Init
+      when (p == NotStarted) $ action $ Init w1
       slot <- viewModelState currentSlot
       when (slot < 101) $ action $ WaitUntil 101
 
 prop_NoLockedFunds :: Property
-prop_NoLockedFunds = checkNoLockedFundsProof options handleSpec noLockProof
+prop_NoLockedFunds = checkNoLockedFundsProof options noLockProof
 
 tests :: TestTree
 tests =
@@ -338,4 +357,6 @@ tests =
             auctionTrace2
         , testProperty "QuickCheck property" $
             withMaxSuccess 10 prop_FinishAuction
+        , testProperty "NLFP fails" $
+            expectFailure $ noShrinking prop_NoLockedFunds
         ]

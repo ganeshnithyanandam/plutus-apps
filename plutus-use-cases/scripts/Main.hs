@@ -1,10 +1,6 @@
-{-# LANGUAGE DeriveAnyClass     #-}
-{-# LANGUAGE DeriveGeneric      #-}
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE FlexibleInstances  #-}
-{-# LANGUAGE NamedFieldPuns     #-}
 {-# LANGUAGE OverloadedStrings  #-}
-{-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE TypeFamilies       #-}
 
 module Main(main, ExportTx(..)) where
@@ -21,6 +17,7 @@ import Plutus.Trace (Command (..), ScriptsConfig (..), showStats, writeScriptsTo
 import Spec.Currency qualified as Currency
 import Spec.Escrow qualified as Escrow
 import Spec.Future qualified as Future
+import Spec.Game qualified as Game
 import Spec.GameStateMachine qualified as GameStateMachine
 import Spec.MultiSig qualified as MultiSig
 import Spec.MultiSigStateMachine qualified as MultiSigStateMachine
@@ -35,6 +32,7 @@ writeWhat :: Command -> String
 writeWhat (Scripts FullyAppliedValidators) = "scripts (fully applied)"
 writeWhat (Scripts UnappliedValidators)    = "scripts (unapplied)"
 writeWhat Transactions{}                   = "transactions"
+writeWhat MkTxLogs                         = "mkTx logs"
 
 pathParser :: Parser FilePath
 pathParser = strArgument (metavar "SCRIPT_PATH" <> help "output path")
@@ -48,7 +46,7 @@ networkIdParser =
     in p <|> pure C.Mainnet
 
 commandParser :: Parser Command
-commandParser = hsubparser $ mconcat [scriptsParser, transactionsParser]
+commandParser = hsubparser $ mconcat [scriptsParser, transactionsParser, mkTxParser]
 
 scriptsParser :: Mod CommandFields Command
 scriptsParser =
@@ -63,6 +61,13 @@ transactionsParser =
     info
         (Transactions <$> networkIdParser <*> protocolParamsParser)
         (fullDesc <> progDesc "Write partial transactions")
+
+mkTxParser :: Mod CommandFields Command
+mkTxParser =
+    command "mktx" $
+    info
+        (pure MkTxLogs)
+        (fullDesc <> progDesc "Write logs for 'mkTx' calls")
 
 progParser :: ParserInfo ScriptsConfig
 progParser =
@@ -84,8 +89,8 @@ writeScripts config = do
         [ -- TODO: The revert of input-output-hk/cardano-node#3206 prevents us from using traces
           --       for the auction contract for now. Uncomment the following code whenever we
           --       have a proper implementation.
-          --  ("auction_1", Auction.auctionTrace1, Auction.auctionEmulatorCfg)
-          --, ("auction_2", Auction.auctionTrace2, Auction.auctionEmulatorCfg)
+          --  ("auction_1", Auction.auctionTrace1, view emulatorConfig Auction.options)
+          --, ("auction_2", Auction.auctionTrace2, view emulatorConfig Auction.options)
           ("crowdfunding-success", Crowdfunding.successfulCampaign, def)
         , ("currency", Currency.currencyTrace, def)
         , ("escrow-redeem_1", Escrow.redeemTrace, def)
@@ -94,6 +99,7 @@ writeScripts config = do
         , ("future-increase-margin", Future.increaseMarginTrace, def)
         , ("future-settle-early", Future.settleEarlyTrace, def)
         , ("future-pay-out", Future.payOutTrace, def)
+        , ("game-success", Game.successTrace, def)
         , ("game-sm-success_1", GameStateMachine.successTrace, def)
         , ("game-sm-success_2", GameStateMachine.successTrace2, def)
         , ("multisig-success", MultiSig.succeedingTrace, def)

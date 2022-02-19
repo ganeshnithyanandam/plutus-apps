@@ -88,6 +88,7 @@ import Data.Set qualified as Set
 import Data.Tuple (swap)
 import Data.Typeable (Typeable)
 import GHC.Generics (Generic)
+import Ledger.Address qualified as P
 import Ledger.Scripts qualified as P
 import Ledger.Tx.CardanoAPITemp (makeTransactionBody')
 import Plutus.V1.Ledger.Ada qualified as Ada
@@ -303,8 +304,9 @@ fromAlonzoLedgerScript (Alonzo.PlutusScript _ bs) =
              $ SBS.fromShort bs
    in either (const Nothing) Just script
 
+
 toCardanoTxBody ::
-    [Api.PubKeyHash] -- ^ Required signers of the transaction
+    [P.PaymentPubKeyHash] -- ^ Required signers of the transaction
     -> Maybe C.ProtocolParameters -- ^ Protocol parameters to use. Building Plutus transactions will fail if this is 'Nothing'
     -> C.NetworkId -- ^ Network ID
     -> P.Tx
@@ -312,7 +314,7 @@ toCardanoTxBody ::
 toCardanoTxBody sigs protocolParams networkId P.Tx{..} = do
     txIns <- traverse toCardanoTxInBuild $ Set.toList txInputs
     txInsCollateral <- toCardanoTxInsCollateral txCollateral
-    txOuts <- traverse (toCardanoTxOut networkId) txOutputs
+    txOuts <- traverse (toCardanoTxOut networkId txData) txOutputs
     txFee' <- toCardanoFee txFee
     txValidityRange <- toCardanoValidityRange txValidRange
     txMintValue <- toCardanoMintValue txRedeemers txMint txMintScripts
@@ -419,11 +421,16 @@ fromCardanoTxOut (C.TxOut addr value datumHash) =
     <*> pure (fromCardanoTxOutValue value)
     <*> pure (fromCardanoTxOutDatumHash datumHash)
 
-toCardanoTxOut :: C.NetworkId -> P.TxOut -> Either ToCardanoError (C.TxOut C.CtxTx C.AlonzoEra)
-toCardanoTxOut networkId (P.TxOut addr value datumHash) =
+toCardanoTxOut :: C.NetworkId -> Map P.DatumHash P.Datum -> P.TxOut -> Either ToCardanoError (C.TxOut C.CtxTx C.AlonzoEra)
+toCardanoTxOut networkId datums (P.TxOut addr value datumHash) =
     C.TxOut <$> toCardanoAddress networkId addr
             <*> toCardanoTxOutValue value
-            <*> toCardanoTxOutDatumHash datumHash
+            <*> cardanoDatumHash
+  where
+    cardanoDatumHash =
+      case flip Map.lookup datums =<< datumHash of
+        Just datum -> pure $ C.TxOutDatum C.ScriptDataInAlonzoEra (toCardanoScriptData $ P.getDatum datum)
+        Nothing    -> toCardanoTxOutDatumHash datumHash
 
 fromCardanoAddress :: C.AddressInEra era -> Either FromCardanoError P.Address
 fromCardanoAddress (C.AddressInEra C.ByronAddressInAnyEra (C.ByronAddress address)) =
@@ -452,14 +459,14 @@ fromCardanoPaymentCredential (C.PaymentCredentialByKey paymentKeyHash) = Credent
 fromCardanoPaymentCredential (C.PaymentCredentialByScript scriptHash) = Credential.ScriptCredential (fromCardanoScriptHash scriptHash)
 
 toCardanoPaymentCredential :: Credential.Credential -> Either ToCardanoError C.PaymentCredential
-toCardanoPaymentCredential (Credential.PubKeyCredential pubKeyHash) = C.PaymentCredentialByKey <$> toCardanoPaymentKeyHash pubKeyHash
+toCardanoPaymentCredential (Credential.PubKeyCredential pubKeyHash) = C.PaymentCredentialByKey <$> toCardanoPaymentKeyHash (P.PaymentPubKeyHash pubKeyHash)
 toCardanoPaymentCredential (Credential.ScriptCredential validatorHash) = C.PaymentCredentialByScript <$> toCardanoScriptHash validatorHash
 
 fromCardanoPaymentKeyHash :: C.Hash C.PaymentKey -> P.PubKeyHash
 fromCardanoPaymentKeyHash paymentKeyHash = P.PubKeyHash $ PlutusTx.toBuiltin $ C.serialiseToRawBytes paymentKeyHash
 
-toCardanoPaymentKeyHash :: P.PubKeyHash -> Either ToCardanoError (C.Hash C.PaymentKey)
-toCardanoPaymentKeyHash (P.PubKeyHash bs) =
+toCardanoPaymentKeyHash :: P.PaymentPubKeyHash -> Either ToCardanoError (C.Hash C.PaymentKey)
+toCardanoPaymentKeyHash (P.PaymentPubKeyHash (P.PubKeyHash bs)) =
     let bsx = PlutusTx.fromBuiltin bs
         tg = "toCardanoPaymentKeyHash (" <> show (BS.length bsx) <> " bytes)"
     in tag tg $ deserialiseFromRawBytes (C.AsHash C.AsPaymentKey) bsx

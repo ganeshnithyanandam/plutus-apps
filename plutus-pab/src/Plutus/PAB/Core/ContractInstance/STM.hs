@@ -54,7 +54,6 @@ import Control.Concurrent.STM (STM, TMVar, TVar)
 import Control.Concurrent.STM qualified as STM
 import Control.Monad (guard, (<=<))
 import Data.Aeson (Value)
-import Data.Default (def)
 import Data.Foldable (fold)
 import Data.List.NonEmpty (NonEmpty)
 import Data.Map (Map)
@@ -149,20 +148,23 @@ data OpenTxOutProducedRequest =
 --   may be interested in.
 data BlockchainEnv =
     BlockchainEnv
-        { beCurrentSlot  :: TVar Slot -- ^ Current slot
-        , beTxChanges    :: TVar (UtxoIndex TxIdState) -- ^ Map holding metadata which determines the status of transactions.
-        , beTxOutChanges :: TVar (UtxoIndex TxOutBalance) -- ^ Map holding metadata which determines the status of transaction outputs.
-        , beCurrentBlock :: TVar BlockNumber -- ^ Current block
+        { beRollbackHistory :: Maybe Int -- ^ How much history do we retain in the environment. Zero signifies no trimming is done.
+        , beCurrentSlot     :: TVar Slot -- ^ Current slot
+        , beTxChanges       :: TVar (UtxoIndex TxIdState) -- ^ Map holding metadata which determines the status of transactions.
+        , beTxOutChanges    :: TVar (UtxoIndex TxOutBalance) -- ^ Map holding metadata which determines the status of transaction outputs.
+        , beCurrentBlock    :: TVar BlockNumber -- ^ Current block.
+        , beSlotConfig      :: TimeSlot.SlotConfig
         }
 
 -- | Initialise an empty 'BlockchainEnv' value
-emptyBlockchainEnv :: STM BlockchainEnv
-emptyBlockchainEnv =
-    BlockchainEnv
+emptyBlockchainEnv :: Maybe Int -> TimeSlot.SlotConfig -> STM BlockchainEnv
+emptyBlockchainEnv rollbackHistory slotConfig =
+    BlockchainEnv rollbackHistory
         <$> STM.newTVar 0
         <*> STM.newTVar mempty
         <*> STM.newTVar mempty
         <*> STM.newTVar (BlockNumber 0)
+        <*> pure slotConfig
 
 -- | Wait until the current slot is greater than or equal to the
 --   target slot, then return the current slot.
@@ -175,9 +177,9 @@ awaitSlot targetSlot BlockchainEnv{beCurrentSlot} = do
 -- | Wait until the current time is greater than or equal to the
 -- target time, then return the current time.
 awaitTime :: POSIXTime -> BlockchainEnv -> STM POSIXTime
-awaitTime targetTime be = do
-    let targetSlot = TimeSlot.posixTimeToEnclosingSlot def targetTime
-    TimeSlot.slotToEndPOSIXTime def <$> awaitSlot targetSlot be
+awaitTime targetTime be@BlockchainEnv{beSlotConfig} = do
+    let targetSlot = TimeSlot.posixTimeToEnclosingSlot beSlotConfig targetTime
+    TimeSlot.slotToEndPOSIXTime beSlotConfig <$> awaitSlot targetSlot be
 
 -- | Wait for an endpoint response.
 awaitEndpointResponse :: Request ActiveEndpoint -> InstanceState -> STM (EndpointValue Value)

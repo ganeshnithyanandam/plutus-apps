@@ -43,9 +43,11 @@ library
         Data.UUID.Extras
         Plutus.Contract
         Plutus.Contract.Effects
+        Plutus.Contract.Error
         Plutus.Contract.Request
         Plutus.Contract.Checkpoint
         Plutus.Contract.Constraints
+        Plutus.Contract.Logging
         Plutus.Contract.Oracle
         Plutus.Contract.State
         Plutus.Contract.Schema
@@ -157,8 +159,11 @@ library
     if !(impl(ghcjs) || os(ghcjs) || os(windows))
         exposed-modules:
             Plutus.Contract.Test
-            Plutus.Contract.Test.ContractModel
             Plutus.Contract.Test.Coverage
+            Plutus.Contract.Test.ContractModel
+            Plutus.Contract.Test.ContractModel.Internal
+            Plutus.Contract.Test.ContractModel.Symbolics
+            Plutus.Contract.Test.ContractModel.CrashTolerance
         build-depends:
             tasty -any,
             tasty-hunit -any,
@@ -178,6 +183,7 @@ test-suite plutus-contract-test
                  -fobject-code -fno-ignore-interface-pragmas -fno-omit-interface-pragmas
     hs-source-dirs: test
     other-modules:
+        Spec.Balancing
         Spec.Contract
         Spec.ErrorChecking
         Spec.Emulator
@@ -186,6 +192,7 @@ test-suite plutus-contract-test
         Spec.ThreadToken
         Spec.Secrets
         Spec.Plutus.Contract.Wallet
+        Spec.Plutus.Contract.Oracle
     build-depends:
         base >=4.9 && <5,
         bytestring -any,
@@ -205,7 +212,6 @@ test-suite plutus-contract-test
         aeson -any,
         lens -any,
         transformers -any,
-        extensible-effects -any,
         plutus-chain-index-core -any,
         plutus-contract -any,
         plutus-ledger -any,

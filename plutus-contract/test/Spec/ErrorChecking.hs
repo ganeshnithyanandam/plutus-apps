@@ -29,7 +29,7 @@ import Plutus.Trace.Emulator as Trace
 import PlutusTx qualified
 import PlutusTx.ErrorCodes
 import PlutusTx.IsData.Class
-import PlutusTx.Prelude
+import PlutusTx.Prelude hiding ((<$))
 
 import Prelude qualified as Haskell
 
@@ -48,34 +48,34 @@ tests = testGroup "error checking"
 
 -- | Normal failures should be allowed
 prop_FailFalse :: Property
-prop_FailFalse = checkErrorWhitelist handleSpecs defaultWhitelist (Actions [FailFalse])
+prop_FailFalse = checkErrorWhitelist defaultWhitelist (actionsFromList [FailFalse])
 
 -- | Head Nil failure should not be allowed
 prop_FailHeadNil :: Property
-prop_FailHeadNil = checkErrorWhitelist handleSpecs defaultWhitelist (Actions [FailHeadNil])
+prop_FailHeadNil = checkErrorWhitelist defaultWhitelist (actionsFromList [FailHeadNil])
 
 -- | Division by zero failure should not be allowed
 prop_DivZero :: Property
-prop_DivZero = checkErrorWhitelist handleSpecs defaultWhitelist (Actions [DivZero])
+prop_DivZero = checkErrorWhitelist defaultWhitelist (actionsFromList [DivZero])
 
 -- | Division by zero failure should not be allowed (tracing before the failure).
 prop_DivZero_t :: Property
-prop_DivZero_t = checkErrorWhitelist handleSpecs defaultWhitelist (Actions [DivZero_t])
+prop_DivZero_t = checkErrorWhitelist defaultWhitelist (actionsFromList [DivZero_t])
 
 -- | Successful validation should be allowed
 prop_Success :: Property
-prop_Success = checkErrorWhitelist handleSpecs defaultWhitelist (Actions [Success])
+prop_Success = checkErrorWhitelist defaultWhitelist (actionsFromList [Success])
 
 -- | This QuickCheck model only provides an interface to the validators used in this
 -- test that are convenient for testing them in isolation.
 data DummyModel = DummyModel deriving Haskell.Show
 
-deriving instance Haskell.Eq (ContractInstanceKey DummyModel w schema err)
-deriving instance Haskell.Show (ContractInstanceKey DummyModel w schema err)
+deriving instance Haskell.Eq (ContractInstanceKey DummyModel w schema err param)
+deriving instance Haskell.Show (ContractInstanceKey DummyModel w schema err param)
 
 instance ContractModel DummyModel where
-  data ContractInstanceKey DummyModel w schema err where
-    WalletKey :: Wallet -> ContractInstanceKey DummyModel () Schema ContractError
+  data ContractInstanceKey DummyModel w schema err param where
+    WalletKey :: Wallet -> ContractInstanceKey DummyModel () Schema ContractError ()
 
   data Action DummyModel = FailFalse
                          | FailHeadNil
@@ -84,7 +84,7 @@ instance ContractModel DummyModel where
                          | Success
                          deriving (Haskell.Eq, Haskell.Show)
 
-  perform handle _ cmd = void $ case cmd of
+  perform handle _ _ cmd = void $ case cmd of
     FailFalse -> do
       callEndpoint @"failFalse" (handle $ WalletKey w1) ()
       Trace.waitNSlots 2
@@ -103,6 +103,12 @@ instance ContractModel DummyModel where
 
   initialState = DummyModel
 
+  initialInstances = [StartContract (WalletKey w1) ()]
+
+  instanceWallet (WalletKey w) = w
+
+  instanceContract _ (WalletKey _) _ = contract
+
   nextState _ = wait 2
 
   arbitraryAction _ = elements [FailFalse, FailHeadNil, DivZero, DivZero_t, Success]
@@ -117,9 +123,6 @@ type Schema = Endpoint "failFalse" ()
             .\/ Endpoint "divZero" ()
             .\/ Endpoint "divZero_t" ()
             .\/ Endpoint "success" ()
-
-handleSpecs :: [ContractInstanceSpec DummyModel]
-handleSpecs = [ContractInstanceSpec (WalletKey w1) w1 contract]
 
 -- | For each endpoint in the schema: pay to the corresponding validator
 -- and then spend that UTxO

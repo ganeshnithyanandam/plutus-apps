@@ -46,9 +46,11 @@ import Data.Aeson (FromJSON, ToJSON)
 import Data.Map.Strict (Map)
 import Data.Text (Text)
 import GHC.Generics (Generic)
-import Ledger (PubKeyHash)
+import Ledger (PaymentPubKeyHash)
+import Ledger.Ada (Ada)
 import Plutus.ChainIndex (ChainIndexQueryEffect)
 import Plutus.PAB.Arbitrary ()
+import Plutus.PAB.Types (PABError)
 import Prettyprinter (Pretty (pretty), (<+>))
 import Servant (ServerError)
 import Servant.Client (ClientError)
@@ -56,13 +58,14 @@ import Servant.Client.Internal.HttpClient (ClientEnv)
 import Wallet.Effects (NodeClientEffect, WalletEffect)
 import Wallet.Emulator.Error (WalletAPIError)
 import Wallet.Emulator.LogMessages (TxBalanceMsg)
-import Wallet.Emulator.Wallet (Wallet, WalletId, WalletState (WalletState, _mockWallet), toMockWallet, walletPubKeyHash)
+import Wallet.Emulator.Wallet (Wallet, WalletId, WalletState (WalletState, _mockWallet), mockWalletPaymentPubKeyHash,
+                               toMockWallet)
 
 -- | Information about an emulated wallet.
 data WalletInfo =
     WalletInfo
-        { wiWallet     :: Wallet
-        , wiPubKeyHash :: PubKeyHash -- ^ Hash of the wallet's public key, serving as wallet ID
+        { wiWallet            :: Wallet
+        , wiPaymentPubKeyHash :: PaymentPubKeyHash -- ^ Hash of the wallet's public key, serving as wallet ID
         }
     deriving stock (Show, Generic)
     deriving anyclass (ToJSON, FromJSON)
@@ -70,12 +73,12 @@ data WalletInfo =
 type Wallets = Map Wallet WalletState
 
 fromWalletState :: WalletState -> WalletInfo
-fromWalletState WalletState{_mockWallet} = WalletInfo{wiWallet, wiPubKeyHash} where
+fromWalletState WalletState{_mockWallet} = WalletInfo{wiWallet, wiPaymentPubKeyHash} where
     wiWallet = toMockWallet _mockWallet
-    wiPubKeyHash = walletPubKeyHash wiWallet
+    wiPaymentPubKeyHash = mockWalletPaymentPubKeyHash wiWallet
 
 data MultiWalletEffect r where
-    CreateWallet :: MultiWalletEffect WalletInfo
+    CreateWallet :: Maybe Ada -> MultiWalletEffect WalletInfo
     MultiWallet :: Wallet -> Eff '[WalletEffect] a -> MultiWalletEffect a
     GetWalletInfo :: WalletId -> MultiWalletEffect (Maybe WalletInfo)
 makeEffect ''MultiWalletEffect
@@ -84,6 +87,7 @@ type WalletEffects m = '[ MultiWalletEffect
                         , NodeClientEffect
                         , ChainIndexQueryEffect
                         , State Wallets
+                        , Error PABError
                         , LogMsg Text
                         , Error WalletAPIError
                         , Error ClientError
