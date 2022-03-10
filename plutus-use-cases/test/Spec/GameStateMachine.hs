@@ -1,8 +1,10 @@
 {-# LANGUAGE DataKinds            #-}
+{-# LANGUAGE DeriveDataTypeable   #-}
 {-# LANGUAGE DeriveFunctor        #-}
 {-# LANGUAGE FlexibleContexts     #-}
 {-# LANGUAGE FlexibleInstances    #-}
 {-# LANGUAGE GADTs                #-}
+{-# LANGUAGE ImportQualifiedPost  #-}
 {-# LANGUAGE LambdaCase           #-}
 {-# LANGUAGE MultiWayIf           #-}
 {-# LANGUAGE NumericUnderscores   #-}
@@ -16,6 +18,7 @@
 {-# LANGUAGE UndecidableInstances #-}
 module Spec.GameStateMachine
   ( tests, successTrace, successTrace2, traceLeaveOneAdaInScript, failTrace
+  , runTestsWithCoverage
   , prop_Game, propGame', prop_GameWhitelist
   , check_prop_Game_with_coverage
   , prop_NoLockedFunds
@@ -25,9 +28,11 @@ module Spec.GameStateMachine
   , prop_GameCrashTolerance
   ) where
 
+import Control.Exception hiding (handle)
 import Control.Lens
 import Control.Monad
 import Control.Monad.Freer.Extras.Log (LogLevel (..))
+import Data.Data
 import Data.Maybe
 import Test.QuickCheck as QC hiding (checkCoverage, (.&&.))
 import Test.Tasty hiding (after)
@@ -44,6 +49,7 @@ import Plutus.Contract.Secrets
 import Plutus.Contract.Test hiding (not)
 import Plutus.Contract.Test.ContractModel
 import Plutus.Contract.Test.ContractModel.CrashTolerance
+import Plutus.Contract.Test.Coverage
 import Plutus.Contracts.GameStateMachine as G
 import Plutus.Trace.Emulator as Trace
 import PlutusTx qualified
@@ -60,7 +66,7 @@ data GameModel = GameModel
     , _hasToken      :: Maybe Wallet
     , _currentSecret :: String
     }
-    deriving (Show)
+    deriving (Show, Data)
 
 makeLenses 'GameModel
 
@@ -77,7 +83,7 @@ instance ContractModel GameModel where
     data Action GameModel = Lock      Wallet String Integer
                           | Guess     Wallet String String Integer
                           | GiveToken Wallet
-        deriving (Eq, Show)
+        deriving (Eq, Show, Data)
 
     initialState = GameModel
         { _gameValue     = 0
@@ -197,8 +203,8 @@ prop_GameWhitelist = checkErrorWhitelist defaultWhitelist
 prop_SanityCheckModel :: Property
 prop_SanityCheckModel = propSanityCheckModel @GameModel
 
-prop_SanityCheckAssertions :: Property
-prop_SanityCheckAssertions = propSanityCheckAssertions @GameModel
+prop_SanityCheckAssertions :: Actions GameModel -> Property
+prop_SanityCheckAssertions = propSanityCheckAssertions
 
 check_prop_Game_with_coverage :: IO CoverageReport
 check_prop_Game_with_coverage =
@@ -337,6 +343,32 @@ tests =
 
 initialVal :: Value
 initialVal = Ada.adaValueOf 10
+
+runTestsWithCoverage :: IO ()
+runTestsWithCoverage = do
+  ref <- newCoverageRef
+  defaultMain (coverageTests ref)
+    `catch` \(e :: SomeException) -> do
+                report <- readCoverageRef ref
+                putStrLn . show $ pprCoverageReport (covIdx gameParam) report
+                throwIO e
+  where
+    coverageTests ref = testGroup "game state machine tests"
+                         [ checkPredicateCoverage "run a successful game trace"
+                            ref
+                            (walletFundsChange w2 (Ada.toValue Ledger.minAdaTxOut <> Ada.adaValueOf 3 <> guessTokenVal)
+                            .&&. valueAtAddress (Scripts.validatorAddress $ G.typedValidator gameParam) (Ada.adaValueOf 5 ==)
+                            .&&. walletFundsChange w1 (Ada.toValue (-Ledger.minAdaTxOut) <> Ada.adaValueOf (-8)))
+                            successTrace
+
+                        , checkPredicateCoverage "run a 2nd successful game trace"
+                            ref
+                            (walletFundsChange w2 (Ada.adaValueOf 3)
+                            .&&. valueAtAddress (Scripts.validatorAddress $ G.typedValidator gameParam) (Ada.adaValueOf 0 ==)
+                            .&&. walletFundsChange w1 (Ada.toValue (-Ledger.minAdaTxOut) <> Ada.adaValueOf (-8))
+                            .&&. walletFundsChange w3 (Ada.toValue Ledger.minAdaTxOut <> Ada.adaValueOf 5 <> guessTokenVal))
+                            successTrace2
+                        ]
 
 -- | Wallet 1 locks some funds, transfers the token to wallet 2
 --   which then makes a correct guess and locks the remaining

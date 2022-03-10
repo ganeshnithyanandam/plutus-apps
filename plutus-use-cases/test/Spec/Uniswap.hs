@@ -1,17 +1,20 @@
-{-# LANGUAGE DataKinds          #-}
-{-# LANGUAGE FlexibleContexts   #-}
-{-# LANGUAGE FlexibleInstances  #-}
-{-# LANGUAGE GADTs              #-}
-{-# LANGUAGE LambdaCase         #-}
-{-# LANGUAGE OverloadedStrings  #-}
-{-# LANGUAGE StandaloneDeriving #-}
-{-# LANGUAGE TemplateHaskell    #-}
-{-# LANGUAGE TypeApplications   #-}
-{-# LANGUAGE TypeFamilies       #-}
+{-# LANGUAGE DataKinds           #-}
+{-# LANGUAGE DeriveDataTypeable  #-}
+{-# LANGUAGE FlexibleContexts    #-}
+{-# LANGUAGE FlexibleInstances   #-}
+{-# LANGUAGE GADTs               #-}
+{-# LANGUAGE LambdaCase          #-}
+{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE StandaloneDeriving  #-}
+{-# LANGUAGE TemplateHaskell     #-}
+{-# LANGUAGE TypeApplications    #-}
+{-# LANGUAGE TypeFamilies        #-}
 {-# OPTIONS_GHC -fno-warn-name-shadowing -fno-warn-redundant-constraints #-}
 module Spec.Uniswap where
 
 import Control.Arrow
+import Control.Exception hiding (assert)
 import Control.Lens hiding (elements)
 import Control.Monad
 import Plutus.Contract
@@ -19,16 +22,19 @@ import Plutus.Contract as Contract hiding (throwError)
 import Plutus.Contract.Test hiding (not)
 import Plutus.Contract.Test.ContractModel
 import Plutus.Contract.Test.ContractModel.Symbolics
+import Plutus.Contract.Test.Coverage
 import Plutus.Contracts.Currency qualified as Currency
 import Plutus.Contracts.Uniswap hiding (pools, setupTokens, tokenNames, wallets)
 import Plutus.Contracts.Uniswap.Trace qualified as Uniswap
 import Plutus.Trace.Emulator (EmulatorRuntimeError (GenericError))
 import Plutus.Trace.Emulator qualified as Trace
+import PlutusTx.Coverage
 
 import Ledger qualified as Ledger
 import Ledger.Ada qualified as Ada
 import Ledger.Value qualified as Value
 
+import Data.Data
 import Data.Foldable
 import Data.List
 import Data.Maybe
@@ -51,7 +57,7 @@ import Data.Semigroup qualified as Semigroup
 
 import Ledger.Constraints
 
-data PoolIndex = PoolIndex SymToken SymToken deriving (Show)
+data PoolIndex = PoolIndex SymToken SymToken deriving (Show, Data)
 
 poolIndex :: SymToken -> SymToken -> PoolIndex
 poolIndex t1 t2 = PoolIndex (min t1 t2) (max t1 t2)
@@ -66,13 +72,13 @@ data PoolModel = PoolModel { _coinAAmount    :: Amount A
                            , _coinBAmount    :: Amount B
                            , _liquidities    :: Map Wallet (Amount Liquidity)
                            , _liquidityToken :: SymToken
-                           } deriving (Ord, Eq, Show)
+                           } deriving (Ord, Eq, Show, Data)
 
 data UniswapModel = UniswapModel { _uniswapToken       :: Maybe SymToken
                                  , _exchangeableTokens :: Set SymToken
                                  , _pools              :: Map PoolIndex PoolModel
                                  , _startedUserCode    :: Set Wallet
-                                 } deriving (Show)
+                                 } deriving (Show, Data)
 
 makeLenses ''UniswapModel
 makeLenses ''PoolModel
@@ -83,8 +89,6 @@ open = to $ \ p -> p ^. coinAAmount > 0 -- If one is bigger than zero the other 
 prop_Uniswap :: Actions UniswapModel -> Property
 prop_Uniswap = propRunActions_
 
-deriving instance Eq (Action UniswapModel)
-deriving instance Show (Action UniswapModel)
 deriving instance Eq (ContractInstanceKey UniswapModel w s e params)
 deriving instance Show (ContractInstanceKey UniswapModel w s e params)
 
@@ -164,6 +168,7 @@ instance ContractModel UniswapModel where
                            -- ^ Amount of liquidity to cash in
                            | ClosePool Wallet SymToken SymToken
                            -- ^ Close a liquidity pool
+                           deriving (Eq, Show, Data)
 
   data ContractInstanceKey UniswapModel w s e params where
     OwnerKey :: ContractInstanceKey UniswapModel (Last (Either Text.Text Uniswap)) EmptySchema ContractError ()
@@ -234,8 +239,6 @@ instance ContractModel UniswapModel where
   precondition _ SetupTokens                  = True
   precondition s (CreatePool _ t1 a1 t2 a2)   = hasUniswapToken s
                                                 && not (hasOpenPool s t1 t2)
-                                                && t1 `elem` s ^. contractState . exchangeableTokens
-                                                && t2 `elem` s ^. contractState . exchangeableTokens
                                                 && t1 /= t2
                                                 && 0 < a1
                                                 && 0 < a2
@@ -271,7 +274,7 @@ instance ContractModel UniswapModel where
         deposit w $ Ada.toValue Ledger.minAdaTxOut
         deposit w $ mconcat [ symAssetClassValue t 1000000 | t <- ts ]
       exchangeableTokens %= (Set.fromList ts <>)
-      wait 20
+      wait 21
 
     Start -> do
       -- Create the uniswap token
@@ -279,7 +282,7 @@ instance ContractModel UniswapModel where
       uniswapToken .= Just us
       -- Pay to the UTxO for the uniswap factory
       withdraw w1 (Ada.toValue Ledger.minAdaTxOut)
-      wait 10
+      wait 6
 
     CreatePool w t1 a1 t2 a2 -> do
       startedUserCode %= Set.insert w
@@ -535,7 +538,27 @@ tests = testGroup "uniswap" [
                        "setupTokens contract should be still running"
         .&&. assertNoFailedTransactions)
         Uniswap.uniswapTrace
-    , testProperty "prop_Uniswap" $ withMaxSuccess 20 prop_Uniswap
+    -- TODO: turned off until there is an option to turn off cardano-ledger validation
+    -- , testProperty "prop_Uniswap" $ withMaxSuccess 20 prop_Uniswap
     , testProperty "prop_UniswapAssertions" $ withMaxSuccess 1000 (propSanityCheckAssertions @UniswapModel)
     , testProperty "prop_NLFP" $ withMaxSuccess 250 prop_CheckNoLockedFundsProofFast
     ]
+
+runTestsWithCoverage :: IO ()
+runTestsWithCoverage = do
+  ref <- newCoverageRef
+  defaultMain (coverageTests ref)
+    `catch` \(e :: SomeException) -> do
+                report <- readCoverageRef ref
+                putStrLn . show $ pprCoverageReport covIdx report
+                throwIO e
+  where
+    coverageTests ref = testGroup "game state machine tests"
+                         [ checkPredicateCoverage "can create a liquidity pool and add liquidity"
+                            ref
+                            (assertNotDone Uniswap.setupTokens
+                                           (Trace.walletInstanceTag w1)
+                                           "setupTokens contract should be still running"
+                            .&&. assertNoFailedTransactions)
+                            Uniswap.uniswapTrace
+                          ]

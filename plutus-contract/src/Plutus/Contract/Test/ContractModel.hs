@@ -16,6 +16,7 @@ module Plutus.Contract.Test.ContractModel
       --
       -- $contractModel
       ContractModel(..)
+    , HasActions(..)
       -- ** Model state
     , ModelState
     , contractState
@@ -58,6 +59,7 @@ module Plutus.Contract.Test.ContractModel
     -- $dynamicLogic
     , DL
     , action
+    , waitUntilDL
     , anyAction
     , anyActions
     , anyActions_
@@ -99,9 +101,11 @@ module Plutus.Contract.Test.ContractModel
     -- ** Model properties
     , propSanityCheckModel
     , propSanityCheckAssertions
+    , propSanityCheckReactive
     -- ** Coverage cheking options
     , CoverageOptions
     , defaultCoverageOptions
+    , CoverageRef
     , endpointCoverageReq
     , checkCoverage
     , coverageIndex
@@ -139,5 +143,6 @@ module Plutus.Contract.Test.ContractModel
     ) where
 
 import Plutus.Contract.Test.ContractModel.Internal
+import Plutus.Contract.Test.Coverage
 import Test.QuickCheck.DynamicLogic.Monad qualified as DL
 import Test.QuickCheck.DynamicLogic.Quantify
