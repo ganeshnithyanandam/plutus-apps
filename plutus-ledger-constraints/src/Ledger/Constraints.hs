@@ -18,11 +18,13 @@ module Ledger.Constraints(
     , TC.mustSpendAtLeast
     , TC.mustSpendPubKeyOutput
     , TC.mustSpendScriptOutput
+    , TC.mustSpendScriptOutputWithMatchingDatumAndValue
     , TC.mustValidateIn
     , TC.mustBeSignedBy
     , TC.mustProduceAtLeast
     , TC.mustIncludeDatum
     , TC.mustPayToOtherScript
+    , TC.mustPayToOtherScriptAddress
     , TC.mustHashDatum
     , TC.mustSatisfyAnyOf
     -- * Queries on constraints
