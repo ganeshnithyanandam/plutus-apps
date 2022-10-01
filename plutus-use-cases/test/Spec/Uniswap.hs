@@ -88,7 +88,10 @@ open :: Getter PoolModel Bool
 open = to $ \ p -> p ^. coinAAmount > 0 -- If one is bigger than zero the other one is too
 
 prop_Uniswap :: Actions UniswapModel -> Property
-prop_Uniswap = propRunActions_
+prop_Uniswap = propRunActionsWithOptions
+  (defaultCheckOptionsContractModel & increaseTransactionLimits)
+  defaultCoverageOptions
+  (\ _ -> pure True)
 
 deriving instance Eq (ContractInstanceKey UniswapModel w s e params)
 deriving instance Show (ContractInstanceKey UniswapModel w s e params)
@@ -138,7 +141,7 @@ getBToken = max
 --   the emulated wallets
 setupTokens :: Contract (Maybe (Semigroup.Last Currency.OneShotCurrency)) Currency.CurrencySchema Currency.CurrencyError ()
 setupTokens = do
-    ownPK <- Contract.ownPaymentPubKeyHash
+    ownPK <- Contract.ownFirstPaymentPubKeyHash
     cur   <- Currency.mintContract ownPK [(fromString tn, fromIntegral (length wallets) * amount) | tn <- tokenNames]
     let cs = Currency.currencySymbol cur
         v  = mconcat [Value.singleton cs (fromString tn) amount | tn <- tokenNames]
@@ -147,7 +150,7 @@ setupTokens = do
         let pkh = mockWalletPaymentPubKeyHash w
         when (pkh /= ownPK) $ do
             cs <- mkTxConstraints @Void mempty (mustPayToPubKey pkh v)
-            submitTxConfirmed . adjustUnbalancedTx $ cs
+            Contract.adjustUnbalancedTx cs >>= submitTxConfirmed
 
     tell $ Just $ Semigroup.Last cur
   where
@@ -622,7 +625,7 @@ prop_Whitelist = checkErrorWhitelist defaultWhitelist
 
 tests :: TestTree
 tests = testGroup "uniswap" [
-    checkPredicate "can create a liquidity pool and add liquidity"
+    checkPredicateOptions (iterate increaseTransactionLimits defaultCheckOptions !! 4) "can create a liquidity pool and add liquidity"
         (assertNotDone Uniswap.setupTokens
                        (Trace.walletInstanceTag w1)
                        "setupTokens contract should be still running"

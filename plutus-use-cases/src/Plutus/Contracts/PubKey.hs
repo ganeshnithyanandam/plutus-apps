@@ -17,18 +17,20 @@
 module Plutus.Contracts.PubKey(pubKeyContract, typedValidator, PubKeyError(..), AsPubKeyError(..)) where
 
 import Control.Lens
+import Control.Monad (void)
 import Control.Monad.Error.Lens
 import Data.Aeson (FromJSON, ToJSON)
 import Data.Map qualified as Map
 import GHC.Generics (Generic)
 
 import Ledger hiding (initialise, to)
-import Ledger.Contexts as V
 import Ledger.Typed.Scripts (TypedValidator)
 import Ledger.Typed.Scripts qualified as Scripts
+import Plutus.V1.Ledger.Contexts as V
 import PlutusTx qualified
 
 import Ledger.Constraints qualified as Constraints
+import Plutus.ChainIndex.Types (Tip (Tip, TipAtGenesis))
 import Plutus.Contract as Contract
 
 mkValidator :: PaymentPubKeyHash -> () -> () -> ScriptContext -> Bool
@@ -45,7 +47,7 @@ typedValidator = Scripts.mkTypedValidatorParam @PubKeyContract
     $$(PlutusTx.compile [|| mkValidator ||])
     $$(PlutusTx.compile [|| wrap ||])
     where
-        wrap = Scripts.wrapValidator
+        wrap = Scripts.mkUntypedValidator
 
 data PubKeyError =
     ScriptOutputMissing PaymentPubKeyHash
@@ -73,8 +75,8 @@ pubKeyContract pk vl = mapError (review _PubKeyError   ) $ do
         address = Scripts.validatorAddress inst
         tx = Constraints.mustPayToTheScript () vl
 
-    ledgerTx <- mkTxConstraints (Constraints.typedValidatorLookups inst) tx
-        >>= submitUnbalancedTx . Constraints.adjustUnbalancedTx
+    ledgerTx <- mkTxConstraints (Constraints.plutusV1TypedValidatorLookups inst) tx
+        >>= adjustUnbalancedTx >>= submitUnbalancedTx
 
     _ <- awaitTxConfirmed (getCardanoTxId ledgerTx)
     let refs = Map.keys
@@ -84,6 +86,44 @@ pubKeyContract pk vl = mapError (review _PubKeyError   ) $ do
     case refs of
         []                   -> throwing _ScriptOutputMissing pk
         [outRef] -> do
+            -- TODO: THE FOLLOWING SHOULD BE REMOVED EVENTUALLY.
+            -- Currently, the PAB indexes information about the status of
+            -- transaction outputs. However, even if the transaction is
+            -- confirmed, it might take some time in order for the chain-index
+            -- to update it's database with the new confirmed transaction.
+            -- Ultimately, the solution is to move indexed information by the
+            -- PAB to the chain-index, so that we get a single source of truth.
+            --
+            -- The temporary solution is to use the 'awaitChainIndexSlot' call
+            -- which waits until the chain-index is up to date. Meaning, the
+            -- chain-index's synced slot should be at least as high as the
+            -- current slot.
+            --
+            -- See https://plutus-apps.readthedocs.io/en/latest/adr/0002-pab-indexing-solution-integration.html"
+            -- for the full explanation.
+            --
+            -- The 'awaitChainIndexSlot' blocks the contract until the chain-index
+            -- is synced until the current slot. This is not a good solution,
+            -- as the chain-index is always some time behind the current slot.
+            slot <- currentPABSlot
+            awaitChainIndexSlot slot
+
             ciTxOut <- unspentTxOutFromRef outRef
             pure (outRef, ciTxOut, inst)
         _                    -> throwing _MultipleScriptOutputs pk
+
+-- | Temporary. Read TODO in 'pubKeyContract'.
+awaitChainIndexSlot :: (AsContractError e) => Slot -> Contract w s e ()
+awaitChainIndexSlot targetSlot = do
+    chainIndexTip <- getTip
+    let chainIndexSlot = getChainIndexSlot chainIndexTip
+    if chainIndexSlot < targetSlot
+       then do
+           void $ waitNSlots 1
+           awaitChainIndexSlot targetSlot
+       else
+           pure ()
+ where
+    getChainIndexSlot :: Tip -> Slot
+    getChainIndexSlot TipAtGenesis   = Slot 0
+    getChainIndexSlot (Tip slot _ _) = slot

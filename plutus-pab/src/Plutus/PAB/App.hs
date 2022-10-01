@@ -29,14 +29,13 @@ module Plutus.PAB.App(
     handleContractDefinition
     ) where
 
-import Cardano.Api.NetworkId.Extra (NetworkIdWrapper (NetworkIdWrapper))
-import Cardano.Api.ProtocolParameters ()
-import Cardano.Api.Shelley (ProtocolParameters)
+import Cardano.Api.NetworkId.Extra (NetworkIdWrapper (unNetworkIdWrapper))
 import Cardano.BM.Trace (Trace, logDebug)
 import Cardano.ChainIndex.Types qualified as ChainIndex
 import Cardano.Node.Client (handleNodeClientClient, runChainSyncWithCfg)
+import Cardano.Node.Params qualified as Params
 import Cardano.Node.Types (ChainSyncHandle, NodeMode (AlonzoNode, MockNode),
-                           PABServerConfig (PABServerConfig, pscBaseUrl, pscNetworkId, pscNodeMode, pscProtocolParametersJsonPath, pscSlotConfig, pscSocketPath))
+                           PABServerConfig (PABServerConfig, pscBaseUrl, pscNetworkId, pscNodeMode, pscSocketPath))
 import Cardano.Protocol.Socket.Mock.Client qualified as MockClient
 import Cardano.Wallet.LocalClient qualified as LocalWalletClient
 import Cardano.Wallet.Mock.Client qualified as WalletMockClient
@@ -50,10 +49,8 @@ import Control.Monad.Freer.Extras.Beam (handleBeam)
 import Control.Monad.Freer.Extras.Log (LogMsg, mapLog)
 import Control.Monad.Freer.Reader (Reader, ask, runReader)
 import Control.Monad.IO.Class (MonadIO (liftIO))
-import Data.Aeson (FromJSON, ToJSON, eitherDecode)
-import Data.ByteString.Lazy qualified as BSL
+import Data.Aeson (FromJSON, ToJSON)
 import Data.Coerce (coerce)
-import Data.Default (def)
 import Data.Pool (Pool)
 import Data.Pool qualified as Pool
 import Data.Text (Text, pack, unpack)
@@ -62,7 +59,8 @@ import Database.Beam.Migrate.Simple (autoMigrate)
 import Database.Beam.Sqlite qualified as Sqlite
 import Database.Beam.Sqlite.Migrate qualified as Sqlite
 import Database.SQLite.Simple qualified as Sqlite
-import Network.HTTP.Client (managerModifyRequest, newManager, setRequestIgnoreStatus)
+import Network.HTTP.Client (ManagerSettings (managerResponseTimeout), managerModifyRequest, newManager,
+                            responseTimeoutMicro, setRequestIgnoreStatus)
 import Network.HTTP.Client.TLS (tlsManagerSettings)
 import Plutus.ChainIndex.Client qualified as ChainIndex
 import Plutus.PAB.Core (EffectHandlers (EffectHandlers), PABAction)
@@ -80,11 +78,10 @@ import Plutus.PAB.Monitoring.Monitoring (convertLog, handleLogMsgTrace)
 import Plutus.PAB.Monitoring.PABLogMsg (PABLogMsg (SMultiAgent), PABMultiAgentMsg (BeamLogItem, UserLog, WalletClient),
                                         WalletClientMsg)
 import Plutus.PAB.Timeout (Timeout (Timeout))
-import Plutus.PAB.Types (Config (Config), DbConfig (..),
-                         DevelopmentOptions (DevelopmentOptions, pabResumeFrom, pabRollbackHistory),
+import Plutus.PAB.Types (ChainQueryConfig (..), ChainQueryEnv (..), Config (Config), DbConfig (..),
                          PABError (BeamEffectError, ChainIndexError, NodeClientError, RemoteWalletWithMockNodeError, WalletClientError, WalletError),
-                         WebserverConfig (WebserverConfig), chainIndexConfig, dbConfig, developmentOptions,
-                         endpointTimeout, nodeServerConfig, pabWebserverConfig, walletServerConfig)
+                         WebserverConfig (WebserverConfig), chainQueryConfig, dbConfig, endpointTimeout,
+                         getBlockfrostEnv, getChainIndexEnv, nodeServerConfig, pabWebserverConfig, walletServerConfig)
 import Servant.Client (ClientEnv, ClientError, mkClientEnv)
 import Wallet.API (NodeClientEffect)
 import Wallet.Effects (WalletEffect)
@@ -92,6 +89,8 @@ import Wallet.Emulator.Wallet (Wallet)
 import Wallet.Error (WalletAPIError)
 import Wallet.Types (ContractInstanceId)
 
+import Plutus.Blockfrost.Client as BlockfrostClient
+import Plutus.Blockfrost.Types qualified as BF (BlockfrostConfig (bfTokenPath), BlockfrostEnv (..))
 ------------------------------------------------------------
 
 -- | Application environment with a contract type `a`.
@@ -100,13 +99,12 @@ data AppEnv a =
         { dbPool                :: Pool Sqlite.Connection
         , walletClientEnv       :: Maybe ClientEnv -- ^ No 'ClientEnv' when in the remote client setting.
         , nodeClientEnv         :: ClientEnv
-        , chainIndexEnv         :: ClientEnv
+        , chainQueryEnv         :: ChainQueryEnv
         , txSendHandle          :: Maybe MockClient.TxSendHandle -- No 'TxSendHandle' required when connecting to the real node.
         , chainSyncHandle       :: ChainSyncHandle
         , appConfig             :: Config
         , appTrace              :: Trace IO (PABLogMsg (Builtin a))
         , appInMemContractStore :: InMemInstances (Builtin a)
-        , protocolParameters    :: ProtocolParameters
         }
 
 appEffectHandlers
@@ -125,10 +123,8 @@ appEffectHandlers storageBackend config trace BuiltinHandler{contractHandler} =
     EffectHandlers
         { initialiseEnvironment = do
             env <- liftIO $ mkEnv trace config
-            let Config { nodeServerConfig = PABServerConfig{pscSocketPath, pscSlotConfig, pscNodeMode, pscNetworkId = NetworkIdWrapper networkId}
-                       , developmentOptions = DevelopmentOptions{pabRollbackHistory, pabResumeFrom} } = config
             instancesState <- liftIO $ STM.atomically Instances.emptyInstancesState
-            blockchainEnv <- liftIO $ BlockchainEnv.startNodeClient pscSocketPath pscNodeMode pabRollbackHistory pscSlotConfig networkId pabResumeFrom instancesState
+            blockchainEnv <- liftIO $ BlockchainEnv.startNodeClient config instancesState
             pure (instancesState, blockchainEnv, env)
 
         , handleLogMessages =
@@ -173,13 +169,19 @@ appEffectHandlers storageBackend config trace BuiltinHandler{contractHandler} =
             . reinterpret (Core.handleMappedReader @(AppEnv a) @(Maybe MockClient.TxSendHandle) txSendHandle)
             . interpret (Core.handleUserEnvReader @(Builtin a) @(AppEnv a))
             . reinterpret (Core.handleMappedReader @(AppEnv a) @ClientEnv nodeClientEnv)
-            . reinterpretN @'[_, _, _, _] (handleNodeClientClient @IO $ pscSlotConfig $ nodeServerConfig config)
+            . reinterpretN @'[_, _, _, _]
+              (\nodeClientEffect -> do
+                params <- liftIO $ Params.fromPABServerConfig $ nodeServerConfig config
+                handleNodeClientClient @IO params nodeClientEffect)
 
             -- handle 'ChainIndexEffect'
             . flip handleError (throwError . ChainIndexError)
             . interpret (Core.handleUserEnvReader @(Builtin a) @(AppEnv a))
-            . reinterpret (Core.handleMappedReader @(AppEnv a) @ClientEnv chainIndexEnv)
-            . reinterpret2 (ChainIndex.handleChainIndexClient @IO)
+            . (case chainQueryConfig config of
+                ChainIndexConfig _ -> reinterpret (Core.handleMappedReader @(AppEnv a) @ClientEnv (getChainIndexEnv . chainQueryEnv))
+                                    . reinterpret2 (ChainIndex.handleChainIndexClient @IO)
+                BlockfrostConfig _ -> reinterpret (Core.handleMappedReader @(AppEnv a) @BF.BlockfrostEnv (getBlockfrostEnv . chainQueryEnv))
+                                    . reinterpret2 (BlockfrostClient.handleBlockfrostClient @IO))
 
             -- handle 'WalletEffect'
             . flip handleError (throwError . WalletClientError)
@@ -188,7 +190,6 @@ appEffectHandlers storageBackend config trace BuiltinHandler{contractHandler} =
             . interpret (Core.handleUserEnvReader @(Builtin a) @(AppEnv a))
             . reinterpret (Core.handleMappedReader @(AppEnv a) @(Maybe ClientEnv) walletClientEnv)
             . interpret (Core.handleUserEnvReader @(Builtin a) @(AppEnv a))
-            . reinterpret (Core.handleMappedReader @(AppEnv a) @ProtocolParameters protocolParameters)
             . interpret (Core.handleInstancesStateReader @(Builtin a) @(AppEnv a))
             . reinterpretN @'[_, _, _, _, _, _] (handleWalletEffect (nodeServerConfig config) cidM wallet)
 
@@ -205,7 +206,6 @@ handleWalletEffect
   , Member (Error WalletAPIError) effs
   , Member (Error PABError) effs
   , Member (Reader (Maybe ClientEnv)) effs
-  , Member (Reader ProtocolParameters) effs
   , Member (LogMsg WalletClientMsg) effs
   , Member (Reader InstancesState) effs
   )
@@ -223,7 +223,7 @@ handleWalletEffect PABServerConfig { pscNodeMode = MockNode } _ w eff = do
 handleWalletEffect nodeCfg@PABServerConfig { pscNodeMode = AlonzoNode } cidM w eff = do
     clientEnvM <- ask @(Maybe ClientEnv)
     case clientEnvM of
-        Nothing -> RemoteWalletClient.handleWalletClient nodeCfg cidM eff
+        Nothing -> RemoteWalletClient.handleWalletClient cidM eff
         Just clientEnv ->
             runReader clientEnv $ LocalWalletClient.handleWalletClient @IO nodeCfg w eff
 
@@ -254,13 +254,13 @@ data StorageBackend = BeamSqliteBackend | InMemoryBackend
 
 mkEnv :: Trace IO (PABLogMsg (Builtin a)) -> Config -> IO (AppEnv a)
 mkEnv appTrace appConfig@Config { dbConfig
-             , nodeServerConfig = PABServerConfig{pscBaseUrl, pscSocketPath, pscProtocolParametersJsonPath, pscNodeMode}
+             , nodeServerConfig = PABServerConfig{pscBaseUrl, pscSocketPath, pscNodeMode, pscNetworkId}
              , walletServerConfig
-             , chainIndexConfig
+             , chainQueryConfig
              } = do
     walletClientEnv <- maybe (pure Nothing) (fmap Just . clientEnv) $ preview Wallet._LocalWalletConfig walletServerConfig
     nodeClientEnv <- clientEnv pscBaseUrl
-    chainIndexEnv <- clientEnv (ChainIndex.ciBaseUrl chainIndexConfig)
+    chainQueryEnv <- mkChainQueryEnv
     dbPool <- dbConnect appTrace dbConfig
     txSendHandle <-
       case pscNodeMode of
@@ -270,22 +270,21 @@ mkEnv appTrace appConfig@Config { dbConfig
     -- This is for access to the slot number in the interpreter
     chainSyncHandle <- runChainSyncWithCfg $ nodeServerConfig appConfig
     appInMemContractStore <- liftIO initialInMemInstances
-    protocolParameters <- maybe (pure def) readPP pscProtocolParametersJsonPath
     pure AppEnv {..}
   where
     clientEnv baseUrl = mkClientEnv <$> liftIO mkManager <*> pure (coerce baseUrl)
 
     mkManager =
         newManager $
-        tlsManagerSettings {managerModifyRequest = pure . setRequestIgnoreStatus}
+        tlsManagerSettings { managerModifyRequest = pure . setRequestIgnoreStatus
+                           , managerResponseTimeout = responseTimeoutMicro 60_000_000 }
 
-    readPP path = do
-      bs <- BSL.readFile path
-      case eitherDecode bs of
-        Left err -> error $ "Error reading protocol parameters JSON file: "
-                         ++ show pscProtocolParametersJsonPath ++ " (" ++ err ++ ")"
-        Right params -> pure params
-
+    mkChainQueryEnv :: IO ChainQueryEnv
+    mkChainQueryEnv = case chainQueryConfig of
+        ChainIndexConfig config -> ChainIndexEnv <$> clientEnv (ChainIndex.ciBaseUrl config)
+        BlockfrostConfig config -> return $ BlockfrostEnv $
+            BF.BlockfrostEnv { envBfTokenPath = BF.bfTokenPath config
+                             , envNetworkId = unNetworkIdWrapper pscNetworkId}
 
 logDebugString :: Trace IO (PABLogMsg t) -> Text -> IO ()
 logDebugString trace = logDebug trace . SMultiAgent . UserLog

@@ -25,8 +25,8 @@ import Ledger (Ada, PaymentPubKeyHash (unPaymentPubKeyHash), ScriptContext (Scri
 import Ledger.Ada qualified as Ada
 import Ledger.Constraints qualified as Constraints
 import Ledger.Typed.Scripts qualified as Scripts
-import Plutus.Contract (Contract, Endpoint, Promise, collectFromScript, endpoint, logInfo, selectList,
-                        submitTxConstraints, submitTxConstraintsSpending, type (.\/), utxosAt)
+import Plutus.Contract (Contract, Endpoint, Promise, endpoint, logInfo, selectList, submitTxConstraints,
+                        submitTxConstraintsSpending, type (.\/), utxosAt)
 import PlutusTx qualified
 import PlutusTx.Prelude (Bool, Semigroup ((<>)), ($), (&&), (-), (.), (>=))
 import Prelude qualified as Haskell
@@ -66,7 +66,7 @@ splitValidator :: Scripts.TypedValidator Split
 splitValidator = Scripts.mkTypedValidator @Split
     $$(PlutusTx.compile [|| validateSplit ||])
     $$(PlutusTx.compile [|| wrap ||]) where
-        wrap = Scripts.wrapValidator @SplitData @()
+        wrap = Scripts.mkUntypedValidator @SplitData @()
 
 -- BLOCK4
 
@@ -106,8 +106,8 @@ mkSplitData LockArgs{recipient1Wallet, recipient2Wallet, totalAda} =
 lockFunds :: SplitData -> Contract () SplitSchema T.Text ()
 lockFunds s@SplitData{amount} = do
     logInfo $ "Locking " <> Haskell.show amount
-    let tx = Constraints.mustPayToTheScript s (Ada.toValue amount)
-    void $ submitTxConstraints splitValidator tx
+    let constraints = Constraints.mustPayToTheScript s (Ada.toValue amount)
+    void $ submitTxConstraints splitValidator constraints
 
 -- BLOCK8
 
@@ -117,7 +117,7 @@ unlockFunds SplitData{recipient1, recipient2, amount} = do
     utxos <- utxosAt contractAddress
     let half = Ada.divide amount 2
         tx =
-            collectFromScript utxos ()
+            Constraints.collectFromTheScript utxos ()
             <> Constraints.mustPayToPubKey recipient1 (Ada.toValue half)
             <> Constraints.mustPayToPubKey recipient2 (Ada.toValue $ amount - half)
     void $ submitTxConstraintsSpending splitValidator utxos tx

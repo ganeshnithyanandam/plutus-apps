@@ -4,6 +4,7 @@
 {-# LANGUAGE LambdaCase       #-}
 {-# LANGUAGE NamedFieldPuns   #-}
 {-# LANGUAGE RankNTypes       #-}
+{-# LANGUAGE RecordWildCards  #-}
 {-# LANGUAGE TemplateHaskell  #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeOperators    #-}
@@ -16,7 +17,7 @@ module Wallet.Emulator.Stream(
     , initialChainState
     , initialDist
     , initialState
-    , slotConfig
+    , params
     , runTraceStream
     -- * Stream manipulation
     , takeUntilSlot
@@ -44,8 +45,10 @@ import Data.Maybe (fromMaybe)
 import Data.Set qualified as Set
 import Ledger.AddressMap qualified as AM
 import Ledger.Blockchain (Block, OnChainTx (Valid))
+import Ledger.CardanoWallet qualified as CW
 import Ledger.Slot (Slot)
-import Ledger.Tx (CardanoTx (..), Tx)
+import Ledger.Tx (Tx)
+import Ledger.Validation qualified as Validation
 import Ledger.Value (Value)
 import Plutus.ChainIndex (ChainIndexError)
 import Streaming (Stream)
@@ -60,8 +63,7 @@ import Wallet.Emulator.MultiAgent (EmulatorState, EmulatorTimeEvent (EmulatorTim
                                    MultiAgentEffect, chainEvent, eteEvent)
 import Wallet.Emulator.Wallet (Wallet, mockWalletAddress)
 
--- TODO: Move these two to 'Wallet.Emulator.XXX'?
-import Ledger.TimeSlot (SlotConfig)
+import Ledger.Params (Params)
 import Plutus.Contract.Trace (InitialDistribution, defaultDist, knownWallets)
 import Plutus.Trace.Emulator.ContractInstance (EmulatorRuntimeError)
 
@@ -119,7 +121,7 @@ runTraceStream :: forall effs.
             , Error EmulatorRuntimeError
             ] ()
     -> Stream (Of (LogMessage EmulatorEvent)) (Eff effs) (Maybe EmulatorErr, EmulatorState)
-runTraceStream conf@EmulatorConfig{_slotConfig} =
+runTraceStream conf@EmulatorConfig{_params} =
     fmap (first (either Just (const Nothing)))
     . S.hoist (pure . run)
     . runStream @(LogMessage EmulatorEvent) @_ @'[]
@@ -131,7 +133,7 @@ runTraceStream conf@EmulatorConfig{_slotConfig} =
     . wrapError ChainIndexErr
     . wrapError AssertionErr
     . wrapError InstanceErr
-    . EM.processEmulated _slotConfig
+    . EM.processEmulated _params
     . subsume
     . subsume @(State EmulatorState)
     . raiseEnd
@@ -139,14 +141,16 @@ runTraceStream conf@EmulatorConfig{_slotConfig} =
 data EmulatorConfig =
     EmulatorConfig
         { _initialChainState :: InitialChainState -- ^ State of the blockchain at the beginning of the simulation. Can be given as a map of funds to wallets, or as a block of transactions.
-        , _slotConfig        :: SlotConfig -- ^ Set the start time of slot 0 and the length of one slot
+        , _params            :: Params -- ^ Set the protocol parameters, network ID and slot configuration for the emulator.
         } deriving (Eq, Show)
 
 type InitialChainState = Either InitialDistribution [Tx]
 
 -- | The wallets' initial funds
-initialDist :: InitialChainState -> InitialDistribution
-initialDist = either id (walletFunds . map Valid) where
+initialDist :: EmulatorConfig -> InitialDistribution
+initialDist EmulatorConfig{..} = either id (walletFunds . map (Valid . signTx)) _initialChainState where
+    signTx t = Validation.fromPlutusTxSigned _params cUtxoIndex t CW.knownPaymentKeys
+    cUtxoIndex = either (error . show) id $ Validation.fromPlutusIndex _params mempty
     walletFunds :: Block -> Map Wallet Value
     walletFunds theBlock =
         let values = AM.values $ AM.fromChain [theBlock]
@@ -156,15 +160,19 @@ initialDist = either id (walletFunds . map Valid) where
 instance Default EmulatorConfig where
   def = EmulatorConfig
           { _initialChainState = Left defaultDist
-          , _slotConfig = def
+          , _params = def
           }
 
 initialState :: EmulatorConfig -> EM.EmulatorState
-initialState EmulatorConfig{_initialChainState} =
+initialState EmulatorConfig{..} =
     either
         (EM.emulatorStateInitialDist . Map.mapKeys EM.mockWalletPaymentPubKeyHash)
-        (EM.emulatorStatePool . map EmulatorTx)
+        (EM.emulatorStatePool . map signTx)
         _initialChainState
+    where
+        signTx t = Validation.fromPlutusTxSigned _params cUtxoIndex t CW.knownPaymentKeys
+        cUtxoIndex = either (error . show) id $ Validation.fromPlutusIndex _params mempty
+
 
 data EmulatorErr =
     WalletErr WalletAPIError

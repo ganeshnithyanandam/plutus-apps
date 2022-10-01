@@ -26,22 +26,25 @@ import Control.Monad.Freer.Extras.Log (LogMessage, LogMsg, LogObserve, handleObs
 import Control.Monad.Freer.Extras.Modify (handleZoomedState, raiseEnd, writeIntoState)
 import Control.Monad.Freer.State (State, get)
 import Data.Aeson (FromJSON, ToJSON)
+import Data.Default (def)
 import Data.Map (Map)
 import Data.Map qualified as Map
 import Data.Maybe (fromMaybe)
 import Data.Text qualified as T
 import Data.Text.Extras (tshow)
 import GHC.Generics (Generic)
-import Prettyprinter (Pretty (pretty), colon, (<+>))
-
 import Ledger hiding (to, value)
 import Ledger.Ada qualified as Ada
 import Ledger.AddressMap qualified as AM
-import Ledger.Index qualified as Index
+import Ledger.CardanoWallet qualified as CW
+import Ledger.Index.Internal qualified as Index
+import Ledger.Validation qualified as Validation
+import Ledger.Value qualified as Value
 import Plutus.ChainIndex.Emulator qualified as ChainIndex
 import Plutus.Contract.Error (AssertionError (GenericAssertion))
 import Plutus.Trace.Emulator.Types (ContractInstanceLog, EmulatedWalletEffects, EmulatedWalletEffects', UserThreadMsg)
 import Plutus.Trace.Scheduler qualified as Scheduler
+import Prettyprinter (Pretty (pretty), colon, (<+>))
 import Wallet.API qualified as WAPI
 import Wallet.Emulator.Chain qualified as Chain
 import Wallet.Emulator.LogMessages (RequestHandlerLogMsg, TxBalanceMsg)
@@ -51,7 +54,7 @@ import Wallet.Emulator.Wallet qualified as Wallet
 
 -- | Assertions which will be checked during execution of the emulator.
 data Assertion
-  = IsValidated Tx -- ^ Assert that the given transaction is validated.
+  = IsValidated CardanoTx -- ^ Assert that the given transaction is validated.
   | OwnFundsEqual Wallet Value -- ^ Assert that the funds belonging to a wallet's public-key address are equal to a value.
 
 -- | An event with a timestamp measured in emulator time
@@ -222,7 +225,7 @@ assertOwnFundsEq :: (Member MultiAgentControlEffect effs) => Wallet -> Value -> 
 assertOwnFundsEq wallet = assertion . OwnFundsEqual wallet
 
 -- | Issue an assertion that the given transaction has been validated.
-assertIsValidated :: (Member MultiAgentControlEffect effs) => Tx -> Eff effs ()
+assertIsValidated :: (Member MultiAgentControlEffect effs) => CardanoTx -> Eff effs ()
 assertIsValidated = assertion . IsValidated
 
 -- | The state of the emulator itself.
@@ -252,7 +255,7 @@ fundsDistribution st =
     let fullState = view chainUtxo st
         wallets = st ^.. walletStates . to Map.keys . folded
         walletFunds = flip fmap wallets $ \w ->
-            (w, foldMap (txOutValue . txOutTxOut) $ view (AM.fundsAt (Wallet.mockWalletAddress w)) fullState)
+            (w, foldMap (txOutValue . snd) $ view (AM.fundsAt (Wallet.mockWalletAddress w)) fullState)
     in Map.fromList walletFunds
 
 -- | Get the emulator log.
@@ -288,7 +291,9 @@ we create 10 Ada-only outputs per wallet here.
 -- | Initialise the emulator state with a single pending transaction that
 --   creates the initial distribution of funds to public key addresses.
 emulatorStateInitialDist :: Map PaymentPubKeyHash Value -> EmulatorState
-emulatorStateInitialDist mp = emulatorStatePool [EmulatorTx tx] where
+emulatorStateInitialDist mp = emulatorStatePool [cTx] where
+    cTx = Validation.fromPlutusTxSigned def cUtxoIndex tx CW.knownPaymentKeys
+    cUtxoIndex = either (error . show) id $ Validation.fromPlutusIndex def mempty
     tx = Tx
             { txInputs = mempty
             , txCollateral = mempty
@@ -302,12 +307,13 @@ emulatorStateInitialDist mp = emulatorStatePool [EmulatorTx tx] where
             , txData = mempty
             }
     -- See [Creating wallets with multiple outputs]
-    mkOutputs (key, vl) = mkOutput key <$> splitHeadinto10 (Wallet.splitOffAdaOnlyValue vl)
-    splitHeadinto10 []       = []
-    splitHeadinto10 (vl:vls) = replicate (fromIntegral count) (Ada.toValue . (`div` count) . Ada.fromValue $ vl) ++ vls
+    mkOutputs (key, vl) = mkOutput key <$> splitInto10 vl
+    splitInto10 vl = replicate (fromIntegral count) (Ada.toValue (ada `div` count)) ++ remainder
         where
+            ada = if Value.isAdaOnlyValue vl then Ada.fromValue vl else Ada.fromValue vl - minAdaTxOut
             -- Make sure we don't make the outputs too small
-            count = min 10 $ Ada.fromValue vl `div` minAdaTxOut
+            count = min 10 $ ada `div` minAdaTxOut
+            remainder = [ vl <> Ada.toValue (-ada) | not (Value.isAdaOnlyValue vl) ]
     mkOutput key vl = pubKeyHashTxOut vl (unPaymentPubKeyHash key)
 
 type MultiAgentEffs =
@@ -398,13 +404,13 @@ assert (OwnFundsEqual wallet value) = ownFundsEqual wallet value
 ownFundsEqual :: (Members MultiAgentEffs effs) => Wallet -> Value -> Eff effs ()
 ownFundsEqual wallet value = do
     es <- get
-    let total = foldMap (txOutValue . txOutTxOut) $ es ^. chainUtxo . AM.fundsAt (Wallet.mockWalletAddress wallet)
+    let total = foldMap (txOutValue . snd) $ es ^. chainUtxo . AM.fundsAt (Wallet.mockWalletAddress wallet)
     if value == total
     then pure ()
     else throwError $ GenericAssertion $ T.unwords ["Funds in wallet", tshow wallet, "were", tshow total, ". Expected:", tshow value]
 
 -- | Issue an assertion that the given transaction has been validated.
-isValidated :: (Members MultiAgentEffs effs) => Tx -> Eff effs ()
+isValidated :: (Members MultiAgentEffs effs) => CardanoTx -> Eff effs ()
 isValidated txn = do
     emState <- get
     if notElem (Valid txn) (join $ emState ^. chainState . Chain.chainNewestFirst)

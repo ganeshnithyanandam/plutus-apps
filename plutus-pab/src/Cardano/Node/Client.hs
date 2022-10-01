@@ -13,8 +13,7 @@ import Control.Monad.Freer.Error (Error, throwError)
 import Control.Monad.Freer.Reader (Reader, ask)
 import Control.Monad.IO.Class
 import Data.Proxy (Proxy (Proxy))
-import Ledger (onCardanoTx)
-import Ledger.TimeSlot (SlotConfig)
+import Ledger (Params, onCardanoTx)
 import Servant (NoContent, (:<|>) (..))
 import Servant.Client (ClientM, client)
 
@@ -45,10 +44,10 @@ handleNodeClientClient ::
     , Member (Reader (Maybe MockClient.TxSendHandle)) effs
     , Member (Reader ChainSyncHandle) effs
     )
-    => SlotConfig
+    => Params
     -> NodeClientEffect
     ~> Eff effs
-handleNodeClientClient slotCfg e = do
+handleNodeClientClient params e = do
     txSendHandle <- ask @(Maybe MockClient.TxSendHandle)
     chainSyncHandle <- ask @ChainSyncHandle
     case e of
@@ -59,10 +58,16 @@ handleNodeClientClient slotCfg e = do
                   -- need to be sent via the wallet, not the mocked server node
                   -- (which is not actually running).
                   throwError TxSenderNotAvailable
-              Just handle -> liftIO $ onCardanoTx (MockClient.queueTx handle) (const $ error "Cardano.Node.Client: Expecting a mock tx, not an Alonzo tx when publishing it.") tx
+              Just handle ->
+                  liftIO $
+                      onCardanoTx (MockClient.queueTx handle)
+                                  (const $ error "Cardano.Node.Client: Expecting a mock tx, not an Alonzo tx when publishing it.")
+                                  tx
         GetClientSlot ->
-            either (liftIO . MockClient.getCurrentSlot) (liftIO . Client.getCurrentSlot) chainSyncHandle
-        GetClientSlotConfig -> pure slotCfg
+            either (liftIO . MockClient.getCurrentSlot)
+                   (liftIO . Client.getCurrentSlot)
+                   chainSyncHandle
+        GetClientParams -> pure params
 
 -- | This does not seem to support resuming so it means that the slot tick will
 -- be behind everything else. This is due to having 2 connections to the node

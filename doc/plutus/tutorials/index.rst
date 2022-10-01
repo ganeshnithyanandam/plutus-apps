@@ -4,14 +4,12 @@ Tutorials
 =========
 
 .. toctree::
-   :maxdepth: 3
+   :maxdepth: 2
    :titlesonly:
 
    plutus-playground
    basic-apps
-   plutus-tx
-   basic-validators
-   basic-minting-policies
+   basic-apps-constraints
    contract-testing
    contract-models
-   
+

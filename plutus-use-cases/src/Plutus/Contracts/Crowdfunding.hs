@@ -55,21 +55,20 @@ import Data.Text (Text)
 import Data.Text qualified as Text
 import GHC.Generics (Generic)
 
-import Ledger (POSIXTime, POSIXTimeRange, PaymentPubKeyHash (unPaymentPubKeyHash), Validator, getCardanoTxId)
+import Ledger (PaymentPubKeyHash (unPaymentPubKeyHash), getCardanoTxId)
 import Ledger qualified
 import Ledger.Ada qualified as Ada
 import Ledger.Constraints qualified as Constraints
-import Ledger.Contexts as V
 import Ledger.Interval qualified as Interval
-import Ledger.Scripts qualified as Scripts
 import Ledger.TimeSlot qualified as TimeSlot
 import Ledger.Typed.Scripts qualified as Scripts hiding (validatorHash)
-import Ledger.Value (Value)
 import Plutus.Contract
-import Plutus.Contract.Typed.Tx qualified as Typed
+import Plutus.Script.Utils.V1.Scripts qualified as Ledger
 import Plutus.Trace.Effects.EmulatorControl (getSlotConfig)
 import Plutus.Trace.Emulator (ContractHandle, EmulatorTrace)
 import Plutus.Trace.Emulator qualified as Trace
+import Plutus.V1.Ledger.Api as V
+import Plutus.V1.Ledger.Contexts as V
 import PlutusTx qualified
 import PlutusTx.Prelude hiding (Applicative (..), Semigroup (..), return, (<$>), (>>), (>>=))
 import Prelude (Semigroup (..), (<$>), (>>=))
@@ -124,7 +123,8 @@ mkCampaign ddl collectionDdl ownerWallet =
 {-# INLINABLE collectionRange #-}
 collectionRange :: Campaign -> POSIXTimeRange
 collectionRange cmp =
-    Interval.interval (campaignDeadline cmp) (campaignCollectionDeadline cmp - 1)
+    -- We have to subtract '2', see Note [Validity Interval's upper bound]
+    Interval.interval (campaignDeadline cmp) (campaignCollectionDeadline cmp - 2)
 
 -- | The 'POSIXTimeRange' during which a refund may be claimed
 {-# INLINABLE refundRange #-}
@@ -142,7 +142,7 @@ typedValidator = Scripts.mkTypedValidatorParam @Crowdfunding
     $$(PlutusTx.compile [|| mkValidator ||])
     $$(PlutusTx.compile [|| wrap ||])
     where
-        wrap = Scripts.wrapValidator
+        wrap = Scripts.mkUntypedValidator
 
 {-# INLINABLE validRefund #-}
 validRefund :: Campaign -> PaymentPubKeyHash -> TxInfo -> Bool
@@ -165,9 +165,7 @@ validCollection campaign txinfo =
 -- additionally parameterized by a 'Campaign' definition. This argument is
 -- provided by the Plutus client, using 'PlutusTx.applyCode'.
 -- As a result, the 'Campaign' definition is part of the script address,
--- and different campaigns have different addresses. The Campaign{..} syntax
--- means that all fields of the 'Campaign' value are in scope
--- (for example 'campaignDeadline' in l. 70).
+-- and different campaigns have different addresses.
 mkValidator :: Campaign -> PaymentPubKeyHash -> CampaignAction -> ScriptContext -> Bool
 mkValidator c con act ScriptContext{scriptContextTxInfo} = case act of
     -- the "refund" branch
@@ -183,7 +181,7 @@ contributionScript = Scripts.validatorScript . typedValidator
 
 -- | The address of a [[Campaign]]
 campaignAddress :: Campaign -> Ledger.ValidatorHash
-campaignAddress = Scripts.validatorHash . contributionScript
+campaignAddress = Ledger.validatorHash . contributionScript
 
 -- | The crowdfunding contract for the 'Campaign'.
 crowdfunding :: Campaign -> Contract () CrowdfundingSchema ContractError ()
@@ -204,12 +202,13 @@ theCampaign startTime = Campaign
 contribute :: Campaign -> Promise () CrowdfundingSchema ContractError ()
 contribute cmp = endpoint @"contribute" $ \Contribution{contribValue} -> do
     logInfo @Text $ "Contributing " <> Text.pack (Haskell.show contribValue)
-    contributor <- ownPaymentPubKeyHash
+    contributor <- ownFirstPaymentPubKeyHash
     let inst = typedValidator cmp
         tx = Constraints.mustPayToTheScript contributor contribValue
+                -- We have to subtract '2', see Note [Validity Interval's upper bound]
                 <> Constraints.mustValidateIn (Interval.to (campaignDeadline cmp))
-    txid <- fmap getCardanoTxId $ mkTxConstraints (Constraints.typedValidatorLookups inst) tx
-        >>= submitUnbalancedTx . Constraints.adjustUnbalancedTx
+    txid <- fmap getCardanoTxId $ mkTxConstraints (Constraints.plutusV1TypedValidatorLookups inst) tx
+        >>= adjustUnbalancedTx >>= submitUnbalancedTx
 
     utxo <- watchAddressUntilTime (Scripts.validatorAddress inst) $ campaignCollectionDeadline cmp
 
@@ -218,15 +217,15 @@ contribute cmp = endpoint @"contribute" $ \Contribution{contribValue} -> do
     -- then we can claim a refund.
 
     let flt Ledger.TxOutRef{txOutRefId} _ = txid Haskell.== txOutRefId
-        tx' = Typed.collectFromScriptFilter flt utxo Refund
+        tx' = Constraints.collectFromTheScriptFilter flt utxo Refund
                 <> Constraints.mustValidateIn (refundRange cmp)
                 <> Constraints.mustBeSignedBy contributor
     if Constraints.modifiesUtxoSet tx'
     then do
         logInfo @Text "Claiming refund"
-        void $ mkTxConstraints (Constraints.typedValidatorLookups inst
+        void $ mkTxConstraints (Constraints.plutusV1TypedValidatorLookups inst
                              <> Constraints.unspentOutputs utxo) tx'
-            >>= submitUnbalancedTx . Constraints.adjustUnbalancedTx
+            >>= adjustUnbalancedTx >>= submitUnbalancedTx
     else pure ()
 
 -- | The campaign owner's branch of the contract for a given 'Campaign'. It
@@ -244,13 +243,14 @@ scheduleCollection cmp = endpoint @"schedule collection" $ \() -> do
     _ <- awaitTime $ campaignDeadline cmp
     unspentOutputs <- utxosAt (Scripts.validatorAddress inst)
 
-    let tx = Typed.collectFromScript unspentOutputs Collect
+    let tx = Constraints.collectFromTheScript unspentOutputs Collect
+            <> Constraints.mustBeSignedBy (campaignOwner cmp)
             <> Constraints.mustValidateIn (collectionRange cmp)
 
     logInfo @Text "Collecting funds"
-    void $ mkTxConstraints (Constraints.typedValidatorLookups inst
+    void $ mkTxConstraints (Constraints.plutusV1TypedValidatorLookups inst
                          <> Constraints.unspentOutputs unspentOutputs) tx
-        >>= submitUnbalancedTx . Constraints.adjustUnbalancedTx
+        >>= adjustUnbalancedTx >>= submitUnbalancedTx
 
 -- | Call the "schedule collection" endpoint and instruct the campaign owner's
 --   wallet (wallet 1) to start watching the campaign address.

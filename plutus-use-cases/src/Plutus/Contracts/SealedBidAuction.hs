@@ -175,7 +175,8 @@ auctionTransition AuctionParams{apOwner, apAsset, apEndTime, apPayoutTime} State
     -- A new bid is placed, a bidder is only allowed to bid once
     (Ongoing bids, PlaceBid bid)
       | sealedBidBidder bid `notElem` map sealedBidBidder bids ->
-        let constraints = Constraints.mustValidateIn (Interval.to $ apEndTime - 1)
+        -- We have to subtract '2', see Note [Validity Interval's upper bound]
+        let constraints = Constraints.mustValidateIn (Interval.to $ apEndTime - 2)
             newState =
               State
                   { stateData  = Ongoing (bid:bids)
@@ -186,7 +187,8 @@ auctionTransition AuctionParams{apOwner, apAsset, apEndTime, apPayoutTime} State
     -- The first bid is revealed
     (Ongoing bids, RevealBid bid)
       | sealBid bid `elem` bids ->
-        let constraints = Constraints.mustValidateIn (Interval.interval apEndTime (apPayoutTime - 1))
+        -- We have to subtract '2', see Note [Validity Interval's upper bound]
+        let constraints = Constraints.mustValidateIn (Interval.interval apEndTime (apPayoutTime - 2))
             newState =
               State
                   { stateData  = AwaitingPayout bid (filter (/= sealBid bid) bids)
@@ -210,7 +212,8 @@ auctionTransition AuctionParams{apOwner, apAsset, apEndTime, apPayoutTime} State
     (AwaitingPayout highestBid sealedBids, RevealBid bid)
       | revealedBid bid > revealedBid highestBid
         && sealBid bid `elem` sealedBids ->
-        let constraints = Constraints.mustValidateIn (Interval.to $ apPayoutTime - 1)
+        -- We have to subtract '2', see Note [Validity Interval's upper bound]
+        let constraints = Constraints.mustValidateIn (Interval.to $ apPayoutTime - 2)
                         <> Constraints.mustPayToPubKey (revealedBidBidder highestBid) (valueOfBid highestBid)
             newState =
               State
@@ -253,7 +256,7 @@ typedValidator = Scripts.mkTypedValidatorParam @AuctionMachine
     $$(PlutusTx.compile [|| mkValidator ||])
     $$(PlutusTx.compile [|| wrap ||])
     where
-        wrap = Scripts.wrapValidator
+        wrap = Scripts.mkUntypedValidator
 
 data AuctionError =
     StateMachineContractError SM.SMContractError -- ^ State machine operation failed
@@ -277,19 +280,19 @@ client auctionParams =
 
 startAuction :: Value -> POSIXTime -> POSIXTime -> Contract () SellerSchema AuctionError ()
 startAuction asset endTime payoutTime = do
-    self <- ownPaymentPubKeyHash
+    self <- ownFirstPaymentPubKeyHash
     let params = AuctionParams self asset endTime payoutTime
     void $ SM.runInitialise (client params) (Ongoing []) (apAsset params)
 
 bid :: AuctionParams -> Promise () BidderSchema AuctionError ()
 bid params = endpoint @"bid" $ \ BidArgs{secretBid} -> do
-    self <- ownPaymentPubKeyHash
+    self <- ownFirstPaymentPubKeyHash
     let sBid = extractSecret secretBid
     void $ SM.runStep (client params) (PlaceBid $ SealedBid (hashSecretInteger sBid) self)
 
 reveal :: AuctionParams -> Promise () BidderSchema AuctionError ()
 reveal params = endpoint @"reveal" $ \ RevealArgs{publicBid} -> do
-    self <- ownPaymentPubKeyHash
+    self <- ownFirstPaymentPubKeyHash
     void $ SM.runStep (client params) (RevealBid $ RevealedBid publicBid self)
 
 payout :: (HasEndpoint "payout" () s) => AuctionParams -> Promise () s AuctionError ()

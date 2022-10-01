@@ -1,6 +1,5 @@
 {-# LANGUAGE DerivingStrategies #-}
 {-# LANGUAGE GADTs              #-}
-{-# LANGUAGE NamedFieldPuns     #-}
 {-# LANGUAGE OverloadedStrings  #-}
 {-# LANGUAGE RecordWildCards    #-}
 {-|
@@ -11,27 +10,20 @@ Interface to the transaction types from 'cardano-api'
 module Plutus.Contract.CardanoAPI(
     fromCardanoBlock
   , fromCardanoTx
+  , setValidity
   , module Export
 ) where
 
 import Cardano.Api qualified as C
-import Data.Set qualified as Set
+import Cardano.Api.Shelley qualified as C
+import Data.List (sort)
 import Ledger qualified as P
 import Ledger.Tx.CardanoAPI as Export
-import Plutus.ChainIndex.Tx (ChainIndexTx (..))
-import Plutus.ChainIndex.Tx qualified as ChainIndex.Tx
+import Plutus.ChainIndex.Types (ChainIndexTx (..), ChainIndexTxOutputs (..))
 
 fromCardanoBlock :: C.BlockInMode C.CardanoMode -> Either FromCardanoError [ChainIndexTx]
 fromCardanoBlock (C.BlockInMode (C.Block C.BlockHeader {} txs) eraInMode) =
-  case eraInMode of
-    -- Unfortunately, we need to pattern match again all eras because
-    -- 'fromCardanoTx' has the constraints 'C.IsCardanoEra era', but not
-    -- 'C.BlockInMode'.
-    C.ByronEraInCardanoMode   -> traverse (fromCardanoTx eraInMode) txs
-    C.ShelleyEraInCardanoMode -> traverse (fromCardanoTx eraInMode) txs
-    C.AllegraEraInCardanoMode -> traverse (fromCardanoTx eraInMode) txs
-    C.MaryEraInCardanoMode    -> traverse (fromCardanoTx eraInMode) txs
-    C.AlonzoEraInCardanoMode  -> traverse (fromCardanoTx eraInMode) txs
+  Export.withIsCardanoEra eraInMode (traverse (fromCardanoTx eraInMode) txs)
 
 -- | Convert a Cardano API tx of any given era to a Plutus chain index tx.
 fromCardanoTx
@@ -44,7 +36,9 @@ fromCardanoTx eraInMode tx@(C.Tx txBody@(C.TxBody C.TxBodyContent{..}) _) = do
     let scriptMap = plutusScriptsFromTxBody txBody
         isTxScriptValid = fromTxScriptValidity txScriptValidity
         (datums, redeemers) = scriptDataFromCardanoTxBody txBody
-        inputs =
+        -- We need to sort the inputs as the order is important
+        -- to find the corresponding redeemers
+        inputs = sort $
           if isTxScriptValid
             then fst <$> txIns
             else case txInsCollateral of
@@ -55,12 +49,17 @@ fromCardanoTx eraInMode tx@(C.Tx txBody@(C.TxBody C.TxBodyContent{..}) _) = do
             { _citxTxId = fromCardanoTxId (C.getTxId txBody)
             , _citxValidRange = fromCardanoValidityRange txValidityRange
             -- If the transaction is invalid, we use collateral inputs
-            , _citxInputs = Set.fromList $ fmap ((`P.TxIn` Nothing) . fromCardanoTxIn) inputs
+            , _citxInputs = fmap ((`P.TxIn` Nothing) . fromCardanoTxIn) inputs
             -- No outputs if the one of scripts failed
-            , _citxOutputs = if isTxScriptValid then ChainIndex.Tx.ValidTx txOutputs
-                                                else ChainIndex.Tx.InvalidTx
+            , _citxOutputs = if isTxScriptValid then ValidTx txOutputs
+                                                else InvalidTx
             , _citxData = datums
             , _citxRedeemers = redeemers
             , _citxScripts = scriptMap
             , _citxCardanoTx = Just $ SomeTx tx eraInMode
             }
+
+setValidity :: Bool -> C.Tx era -> C.Tx era
+setValidity validity (C.Tx (C.ShelleyTxBody C.ShelleyBasedEraAlonzo txBody scripts dat aux _) era) =
+  C.Tx (C.ShelleyTxBody C.ShelleyBasedEraAlonzo txBody scripts dat aux (toTxScriptValidity validity)) era
+setValidity _ tx = tx -- @setValidity@ only applies in Alonzo era (and newer)

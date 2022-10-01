@@ -27,9 +27,8 @@ module Plutus.Contract.Wallet(
     ) where
 
 import Cardano.Api qualified as C
-import Cardano.Api.Shelley qualified as C
 import Control.Applicative ((<|>))
-import Control.Lens ((&), (.~), (^.))
+import Control.Lens ((&), (.~))
 import Control.Monad (join, (>=>))
 import Control.Monad.Error.Lens (throwing)
 import Control.Monad.Freer (Eff, Member)
@@ -49,15 +48,18 @@ import GHC.Generics (Generic)
 import Ledger qualified as Plutus
 import Ledger.Ada qualified as Ada
 import Ledger.Constraints (mustPayToPubKey)
-import Ledger.Constraints.OffChain (UnbalancedTx (UnbalancedTx, unBalancedTxRequiredSignatories, unBalancedTxTx, unBalancedTxUtxoIndex),
-                                    adjustUnbalancedTx, mkTx)
+import Ledger.Constraints.OffChain (UnbalancedTx (UnbalancedCardanoTx, UnbalancedEmulatorTx, unBalancedTxRequiredSignatories, unBalancedTxUtxoIndex, unBalancedTxValidityTimeRange),
+                                    mkTx, unBalancedTxTx)
 import Ledger.Constraints.OffChain qualified as U
 import Ledger.TimeSlot (SlotConfig, posixTimeRangeToContainedSlotRange)
 import Ledger.Tx (CardanoTx, TxOutRef, getCardanoTxInputs, txInRef)
+import Ledger.Validation (CardanoLedgerError, fromPlutusIndex, makeTransactionBody)
 import Plutus.Contract.CardanoAPI qualified as CardanoAPI
 import Plutus.Contract.Error (AsContractError (_ConstraintResolutionContractError, _OtherContractError))
 import Plutus.Contract.Request qualified as Contract
 import Plutus.Contract.Types (Contract)
+import Plutus.Script.Utils.V1.Scripts qualified as Plutus
+import Plutus.V1.Ledger.Api qualified as Plutus
 import Plutus.V1.Ledger.Scripts (MintingPolicyHash)
 import Plutus.V1.Ledger.TxId (TxId (TxId))
 import PlutusTx qualified
@@ -112,10 +114,10 @@ handleTx = balanceTx >=> either throwError WAPI.signTxAndSubmit
 -- | Get an unspent output belonging to the wallet.
 getUnspentOutput :: AsContractError e => Contract w s e TxOutRef
 getUnspentOutput = do
-    ownPkh <- Contract.ownPaymentPubKeyHash
+    ownPkh <- Contract.ownFirstPaymentPubKeyHash
     let constraints = mustPayToPubKey ownPkh (Ada.lovelaceValueOf 1)
     utx <- either (throwing _ConstraintResolutionContractError) pure (mkTx @Void mempty constraints)
-    tx <- Contract.balanceTx (adjustUnbalancedTx utx)
+    tx <- Contract.adjustUnbalancedTx utx >>= Contract.balanceTx
     case Set.lookupMin (getCardanoTxInputs tx) of
         Just inp -> pure $ txInRef inp
         Nothing  -> throwing _OtherContractError "Balanced transaction has no inputs"
@@ -237,38 +239,33 @@ instance ToJSON ExportTxInput where
             ]
 
 export
-    :: C.ProtocolParameters
-    -> C.NetworkId
-    -> SlotConfig
+    :: Plutus.Params
     -> UnbalancedTx
-    -> Either CardanoAPI.ToCardanoError ExportTx
-export params networkId slotConfig utx =
-    let UnbalancedTx
-            { unBalancedTxTx
-            , unBalancedTxUtxoIndex
-            , unBalancedTxRequiredSignatories
-            } = finalize slotConfig utx
-        requiredSigners = Set.toList unBalancedTxRequiredSignatories
+    -> Either CardanoLedgerError ExportTx
+export params utx =
+    let utxFinal = finalize (Plutus.pSlotConfig params) utx
+        requiredSigners = Set.toList (unBalancedTxRequiredSignatories utxFinal)
+        fromCardanoTx ctx = do
+            utxo <- fromPlutusIndex params $ Plutus.UtxoIndex (unBalancedTxUtxoIndex utxFinal)
+            makeTransactionBody params utxo ctx
      in ExportTx
-        <$> mkPartialTx requiredSigners params networkId unBalancedTxTx
-        <*> mkInputs networkId unBalancedTxUtxoIndex
-        <*> mkRedeemers unBalancedTxTx
+        <$> fmap (C.makeSignedTransaction [])
+                 (either
+                     fromCardanoTx
+                     (first Right . CardanoAPI.toCardanoTxBody params requiredSigners)
+                     (unBalancedTxTx utxFinal))
+        <*> first Right (mkInputs (Plutus.pNetworkId params) (unBalancedTxUtxoIndex utxFinal))
+        <*> either (const $ Right []) (first Right . mkRedeemers) (unBalancedTxTx utx)
 
+-- | when we use UnbalancedEmulatorTx, finalize computes the final validityRange and set it into the Tx.
+-- In the case of a UnbalancedCardanoTx, there's nothing to do here as the validityRange of the Tx is set when we process the
+-- constraints.
 finalize :: SlotConfig -> UnbalancedTx -> UnbalancedTx
-finalize slotConfig utx =
-     utx & U.tx
-         . Plutus.validRange
-         .~ posixTimeRangeToContainedSlotRange slotConfig (utx ^. U.validityTimeRange)
-
-mkPartialTx
-    :: [Plutus.PaymentPubKeyHash]
-    -> C.ProtocolParameters
-    -> C.NetworkId
-    -> Plutus.Tx
-    -> Either CardanoAPI.ToCardanoError (C.Tx C.AlonzoEra)
-mkPartialTx requiredSigners params networkId =
-      fmap (C.makeSignedTransaction [])
-    . CardanoAPI.toCardanoTxBody requiredSigners (Just params) networkId
+finalize slotConfig utx@UnbalancedEmulatorTx{unBalancedTxValidityTimeRange} =
+    utx & U.tx
+    . Plutus.validRange
+    .~ posixTimeRangeToContainedSlotRange slotConfig unBalancedTxValidityTimeRange
+finalize _ utx@UnbalancedCardanoTx{} = utx
 
 mkInputs :: C.NetworkId -> Map Plutus.TxOutRef Plutus.TxOut -> Either CardanoAPI.ToCardanoError [ExportTxInput]
 mkInputs networkId = traverse (uncurry (toExportTxInput networkId)) . Map.toList
@@ -280,7 +277,7 @@ toExportTxInput networkId Plutus.TxOutRef{Plutus.txOutRefId, Plutus.txOutRefIdx}
     ExportTxInput
         <$> CardanoAPI.toCardanoTxId txOutRefId
         <*> pure (C.TxIx $ fromInteger txOutRefIdx)
-        <*> CardanoAPI.toCardanoAddress networkId txOutAddress
+        <*> CardanoAPI.toCardanoAddressInEra networkId txOutAddress
         <*> pure (C.selectLovelace cardanoValue)
         <*> sequence (CardanoAPI.toCardanoScriptDataHash <$> txOutDatumHash)
         <*> pure otherQuantities

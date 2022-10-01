@@ -1,5 +1,6 @@
 {-# LANGUAGE DataKinds          #-}
 {-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE FlexibleInstances  #-}
 {-# LANGUAGE TemplateHaskell    #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
 
@@ -8,11 +9,17 @@
 -- across to the test suite.
 module Plutus.PAB.Arbitrary where
 
+import Cardano.Ledger.Alonzo.Rules.Utxos qualified as C.Ledger
+import Cardano.Ledger.Alonzo.Scripts (Tag (Spend))
+import Cardano.Ledger.Alonzo.Tools qualified as C.Ledger
+import Cardano.Ledger.Alonzo.TxWitness qualified as C.Ledger
+import Cardano.Ledger.Crypto (StandardCrypto)
+import Cardano.Ledger.Shelley.API qualified as C.Ledger
 import Control.Monad (replicateM)
 import Data.Aeson (Value)
 import Data.Aeson qualified as Aeson
 import Data.ByteString (ByteString)
-import Ledger (ValidatorHash (ValidatorHash))
+import Data.Set qualified as Set
 import Ledger qualified
 import Ledger.Address (Address (..), PaymentPubKey, PaymentPubKeyHash, StakePubKey, StakePubKeyHash)
 import Ledger.Bytes (LedgerBytes)
@@ -24,9 +31,11 @@ import Ledger.Slot (Slot)
 import Ledger.Tx (RedeemerPtr, ScriptTag, Tx, TxIn, TxInType, TxOut, TxOutRef)
 import Ledger.Tx.CardanoAPI (ToCardanoError)
 import Ledger.TxId (TxId)
-import Ledger.Typed.Tx (ConnectionError, WrongOutTypeError)
 import Plutus.Contract.Effects (ActiveEndpoint (..), PABReq (..), PABResp (..))
 import Plutus.Contract.StateMachine (ThreadToken)
+import Plutus.Script.Utils.V1.Typed.Scripts (ConnectionError, WrongOutTypeError)
+import Plutus.V1.Ledger.Api (ValidatorHash (ValidatorHash))
+import Plutus.V1.Ledger.Scripts qualified as Ledger
 import PlutusTx qualified
 import PlutusTx.AssocMap qualified as AssocMap
 import PlutusTx.Prelude qualified as PlutusTx
@@ -56,6 +65,22 @@ instance Arbitrary Ledger.MintingPolicy where
 instance Arbitrary Ledger.MintingPolicyHash where
     arbitrary = genericArbitrary
     shrink = genericShrink
+
+instance Arbitrary (C.Ledger.ApplyTxError Ledger.EmulatorEra) where
+    arbitrary = pure $ C.Ledger.ApplyTxError []
+    shrink _ = []
+
+instance Arbitrary (C.Ledger.UtxosPredicateFailure Ledger.EmulatorEra) where
+    arbitrary = pure $ C.Ledger.CollectErrors []
+    shrink _ = []
+
+instance Arbitrary (C.Ledger.ScriptFailure StandardCrypto) where
+    arbitrary = pure $ C.Ledger.MissingScript (C.Ledger.RdmrPtr Spend 0)
+    shrink _ = []
+
+instance Arbitrary (C.Ledger.BasicFailure StandardCrypto) where
+    arbitrary = pure $ C.Ledger.UnknownTxIns Set.empty
+    shrink _ = []
 
 instance Arbitrary Ledger.ValidationError where
     arbitrary = genericArbitrary
@@ -193,7 +218,7 @@ instance Arbitrary PlutusTx.Data where
         arbitraryMap n = do
            -- NOTE: A pair always has at least 2 constructors/nodes so we divide by 2
           (n', m) <- segmentRange ((n - 1) `div` 2)
-          PlutusTx.Map <$> replicateM m (arbitraryPair $ n')
+          PlutusTx.Map <$> replicateM m (arbitraryPair n')
 
         arbitraryPair n = do
           (,) <$> arbitraryData half <*> arbitraryData half
@@ -260,10 +285,11 @@ instance Arbitrary PABReq where
     arbitrary =
         oneof
             [ AwaitSlotReq <$> arbitrary
-            , pure CurrentSlotReq
+            , pure CurrentPABSlotReq
+            , pure CurrentChainIndexSlotReq
             , pure OwnContractInstanceIdReq
             , ExposeEndpointReq <$> arbitrary
-            , pure OwnPaymentPublicKeyHashReq
+            , pure OwnAddressesReq
             -- TODO This would need an Arbitrary Tx instance:
             -- , BalanceTxRequest <$> arbitrary
             -- , WriteBalancedTxRequest <$> arbitrary
@@ -298,7 +324,7 @@ instance Arbitrary ActiveEndpoint where
 -- 'Maybe' because we can't (yet) create a generator for every request
 -- type.
 genResponse :: PABReq -> Maybe (Gen PABResp)
-genResponse (AwaitSlotReq slot)        = Just . pure . AwaitSlotResp $ slot
-genResponse (ExposeEndpointReq _)      = Just $ ExposeEndpointResp <$> arbitrary <*> (EndpointValue <$> arbitrary)
-genResponse OwnPaymentPublicKeyHashReq = Just $ OwnPaymentPublicKeyHashResp <$> arbitrary
-genResponse _                          = Nothing
+genResponse (AwaitSlotReq slot)   = Just . pure . AwaitSlotResp $ slot
+genResponse (ExposeEndpointReq _) = Just $ ExposeEndpointResp <$> arbitrary <*> (EndpointValue <$> arbitrary)
+genResponse OwnAddressesReq       = Just $ OwnAddressesResp <$> arbitrary
+genResponse _                     = Nothing

@@ -1,3 +1,4 @@
+{-# LANGUAGE DataKinds          #-}
 {-# LANGUAGE DeriveAnyClass     #-}
 {-# LANGUAGE DeriveGeneric      #-}
 {-# LANGUAGE DerivingStrategies #-}
@@ -5,6 +6,7 @@
 {-# LANGUAGE LambdaCase         #-}
 {-# LANGUAGE NamedFieldPuns     #-}
 {-# LANGUAGE OverloadedStrings  #-}
+{-# LANGUAGE RecordWildCards    #-}
 {-# LANGUAGE StrictData         #-}
 {-# LANGUAGE TemplateHaskell    #-}
 {-# LANGUAGE TypeApplications   #-}
@@ -16,8 +18,9 @@ import Cardano.Node.Types (PABServerConfig)
 import Cardano.Wallet.Types qualified as Wallet
 import Control.Lens.TH (makePrisms)
 import Control.Monad.Freer.Extras.Beam (BeamError)
-import Data.Aeson (FromJSON, ToJSON)
+import Data.Aeson (FromJSON, ToJSON, Value (..), object, parseJSON, toJSON, (.:), (.:?), (.=))
 import Data.Default (Default, def)
+import Data.HashMap.Lazy qualified as HML
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
@@ -25,14 +28,15 @@ import Data.Time.Units (Second)
 import Data.UUID (UUID)
 import Data.UUID.Extras qualified as UUID
 import GHC.Generics (Generic)
-import Ledger (Block, Blockchain, Tx, TxId, eitherTx, txId)
+import Ledger (Block, Blockchain, CardanoTx, TxId, eitherTx, getCardanoTxId)
 import Ledger.Index (UtxoIndex (UtxoIndex))
 import Ledger.Index qualified as UtxoIndex
+import Plutus.Blockfrost.Types qualified as Blockfrost
 import Plutus.ChainIndex.Types (Point (..))
 import Plutus.Contract.Types (ContractError)
 import Plutus.PAB.Instances ()
 import Prettyprinter (Pretty, line, pretty, viaShow, (<+>))
-import Servant.Client (BaseUrl (BaseUrl), ClientError, Scheme (Http))
+import Servant.Client (BaseUrl (BaseUrl), ClientEnv, ClientError, Scheme (Http))
 import Wallet.API (WalletAPIError)
 import Wallet.Emulator.Wallet (Wallet)
 import Wallet.Types (ContractInstanceId (ContractInstanceId), NotificationError)
@@ -113,17 +117,77 @@ defaultDbConfig
 instance Default DbConfig where
   def = defaultDbConfig
 
+data ChainQueryConfig = ChainIndexConfig ChainIndex.ChainIndexConfig
+                      | BlockfrostConfig Blockfrost.BlockfrostConfig
+    deriving stock (Show, Eq, Generic)
+
+instance FromJSON ChainQueryConfig where
+    parseJSON (Object obj) = do
+        ci <- obj .:? "chainIndexConfig"
+        bf <- obj .:? "blockfrostConfig"
+        case (ci, bf) of
+            (Just a, Nothing)  -> pure $ ChainIndexConfig a
+            (Nothing, Just a)  -> pure $ BlockfrostConfig a
+            (Nothing, Nothing) -> error "No configuration available"
+            (Just _, Just _)   -> error "Cant have ChainIndex and Blockfrost configuration"
+    parseJSON _            = fail "Can´t parse ChainQueryConfig from a non-object Value"
+
+instance ToJSON ChainQueryConfig where
+    toJSON (ChainIndexConfig cfg) = object ["chainIndexConfig" .= cfg]
+    toJSON (BlockfrostConfig cfg) = object ["blockfrostConfig" .= cfg]
+
+instance Default ChainQueryConfig where
+    def = ChainIndexConfig def
+
+data ChainQueryEnv = ChainIndexEnv ClientEnv
+                   | BlockfrostEnv Blockfrost.BlockfrostEnv
+
+getChainIndexEnv :: ChainQueryEnv -> ClientEnv
+getChainIndexEnv (ChainIndexEnv env) = env
+getChainIndexEnv (BlockfrostEnv _)   = error "Can't get ChainIndexEnv from BlockfrostEnv"
+
+getBlockfrostEnv :: ChainQueryEnv -> Blockfrost.BlockfrostEnv
+getBlockfrostEnv (BlockfrostEnv env) = env
+getBlockfrostEnv (ChainIndexEnv _)   = error "Can't get BlockfrostEnv from ChainIndexEnv"
+
+
 data Config =
     Config
         { dbConfig                :: DbConfig
         , walletServerConfig      :: Wallet.WalletConfig
         , nodeServerConfig        :: PABServerConfig
         , pabWebserverConfig      :: WebserverConfig
-        , chainIndexConfig        :: ChainIndex.ChainIndexConfig
+        , chainQueryConfig        :: ChainQueryConfig
         , requestProcessingConfig :: RequestProcessingConfig
         , developmentOptions      :: DevelopmentOptions
         }
-    deriving (Show, Eq, Generic, FromJSON, ToJSON)
+    deriving (Show, Eq, Generic)
+
+instance FromJSON Config where
+    parseJSON val@(Object obj) = Config <$> obj .: "dbConfig"
+                                    <*> obj .: "walletServerConfig"
+                                    <*> obj .: "nodeServerConfig"
+                                    <*> obj .: "pabWebserverConfig"
+                                    <*> parseJSON val
+                                    <*> obj .: "requestProcessingConfig"
+                                    <*> obj .: "developmentOptions"
+    parseJSON val = fail $ "Unexpected value: " ++ show val
+
+
+instance ToJSON Config where
+    toJSON Config {..}=
+        object
+        [ "dbConfig" .= dbConfig
+        , "walletServerConfig" .= walletServerConfig
+        , "nodeServerConfig" .= nodeServerConfig
+        , "pabWebserverConfig" .= pabWebserverConfig
+        , "requestProcessingConfig" .= requestProcessingConfig
+        , "developmentOptions" .= developmentOptions
+        ] `mergeObjects` (toJSON chainQueryConfig)
+
+mergeObjects :: Value -> Value -> Value
+mergeObjects (Object o1) (Object o2) = Object $ HML.union o1 o2
+mergeObjects _ _                     = error "Value must be an object"
 
 defaultConfig :: Config
 defaultConfig =
@@ -132,7 +196,7 @@ defaultConfig =
     , walletServerConfig = def
     , nodeServerConfig = def
     , pabWebserverConfig = def
-    , chainIndexConfig = def
+    , chainQueryConfig = def
     , requestProcessingConfig = def
     , developmentOptions = def
     }
@@ -162,6 +226,7 @@ data WebserverConfig =
         , staticDir            :: Maybe FilePath
         , permissiveCorsPolicy :: Bool -- ^ If true; use a very permissive CORS policy (any website can interact.)
         , endpointTimeout      :: Maybe Second
+        , enableMarconi        :: Bool
         }
     deriving (Show, Eq, Generic)
     deriving anyclass (FromJSON, ToJSON)
@@ -175,6 +240,7 @@ defaultWebServerConfig =
     , staticDir            = Nothing
     , permissiveCorsPolicy = False
     , endpointTimeout      = Nothing
+    , enableMarconi        = False
     }
 
 instance Default WebserverConfig where
@@ -212,7 +278,7 @@ toUUID = \case
 data ChainOverview =
     ChainOverview
         { chainOverviewBlockchain     :: Blockchain
-        , chainOverviewUnspentTxsById :: Map TxId Tx
+        , chainOverviewUnspentTxsById :: Map TxId CardanoTx
         , chainOverviewUtxoIndex      :: UtxoIndex
         }
     deriving (Show, Eq, Generic)
@@ -227,7 +293,7 @@ mkChainOverview = foldl reducer emptyChainOverview
                           , chainOverviewUtxoIndex = oldUtxoIndex
                           } txs =
         let unprunedTxById =
-                foldl (\m -> eitherTx (const m) (\tx -> Map.insert (txId tx) tx m)) oldTxById txs
+                foldl (\m -> eitherTx (const m) (\tx -> Map.insert (getCardanoTxId tx) tx m)) oldTxById txs
             newTxById = unprunedTxById -- TODO Prune spent keys.
             newUtxoIndex = UtxoIndex.insertBlock txs oldUtxoIndex
          in ChainOverview

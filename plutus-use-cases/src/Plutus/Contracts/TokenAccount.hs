@@ -44,23 +44,24 @@ import Data.Map qualified as Map
 import GHC.Generics (Generic)
 import Prettyprinter (Pretty)
 
-import Plutus.Contract (AsContractError (_ContractError), Contract, ContractError, Endpoint, HasEndpoint, endpoint,
-                        logInfo, mapError, mkTxConstraints, selectList, submitUnbalancedTx, type (.\/), utxosAt)
+import Plutus.Contract (AsContractError (_ContractError), Contract, ContractError, Endpoint, HasEndpoint,
+                        adjustUnbalancedTx, endpoint, logInfo, mapError, mkTxConstraints, selectList,
+                        submitUnbalancedTx, type (.\/), utxosAt)
 import Plutus.Contract.Constraints (ScriptLookups, TxConstraints)
 import PlutusTx qualified
 
-import Ledger (Address, PaymentPubKeyHash, ValidatorHash)
+import Ledger (PaymentPubKeyHash)
 import Ledger qualified
 import Ledger.Constraints qualified as Constraints
-import Ledger.Contexts qualified as V
-import Ledger.Scripts qualified
 import Ledger.Tx (CardanoTx)
-import Ledger.Typed.Scripts (ValidatorTypes)
-import Ledger.Typed.Scripts qualified as Scripts
+import Ledger.Typed.Scripts (DatumType, RedeemerType, ValidatorTypes)
+import Ledger.Typed.Scripts qualified as Scripts hiding (validatorHash)
 import Ledger.Value (TokenName, Value)
 import Ledger.Value qualified as Value
-import Plutus.Contract.Typed.Tx qualified as TypedTx
 import Plutus.Contracts.Currency qualified as Currency
+import Plutus.Script.Utils.V1.Scripts qualified as Scripts
+import Plutus.V1.Ledger.Api (Address, ValidatorHash)
+import Plutus.V1.Ledger.Contexts qualified as V
 
 import Prettyprinter.Extras (PrettyShow (PrettyShow))
 
@@ -131,13 +132,13 @@ typedValidator = Scripts.mkTypedValidatorParam @TokenAccount
     $$(PlutusTx.compile [|| validate ||])
     $$(PlutusTx.compile [|| wrap ||])
     where
-        wrap = Scripts.wrapValidator
+        wrap = Scripts.mkUntypedValidator
 
 address :: Account -> Address
 address = Scripts.validatorAddress . typedValidator
 
 validatorHash :: Account -> ValidatorHash
-validatorHash = Ledger.Scripts.validatorHash . Scripts.validatorScript . typedValidator
+validatorHash = Scripts.validatorHash . Scripts.validatorScript . typedValidator
 
 -- | A transaction that pays the given value to the account
 payTx
@@ -161,8 +162,8 @@ pay account vl = do
         <> " into "
         <> show account
     mapError (review _TAContractError) $
-          mkTxConstraints (Constraints.typedValidatorLookups inst) (payTx vl)
-      >>= submitUnbalancedTx . Constraints.adjustUnbalancedTx
+          mkTxConstraints (Constraints.plutusV1TypedValidatorLookups inst) (payTx vl)
+      >>= adjustUnbalancedTx >>= submitUnbalancedTx
 
 -- | Create a transaction that spends all outputs belonging to the 'Account'.
 redeemTx :: forall w s e.
@@ -181,9 +182,9 @@ redeemTx account pk = mapError (review _TAContractError) $ do
             <> show numInputs
             <> " outputs with a total value of "
             <> show totalVal
-    let constraints = TypedTx.collectFromScript utxos ()
+    let constraints = Constraints.collectFromTheScript utxos ()
                 <> Constraints.mustPayToPubKey pk (accountToken account)
-        lookups = Constraints.typedValidatorLookups inst
+        lookups = Constraints.plutusV1TypedValidatorLookups inst
                 <> Constraints.unspentOutputs utxos
     -- TODO. Replace 'PubKey' with a more general 'Address' type of output?
     --       Or perhaps add a field 'requiredTokens' to 'LedgerTxConstraints' and let the
@@ -201,8 +202,7 @@ redeem
   -> Contract w s e CardanoTx
 redeem pk account = mapError (review _TokenAccountError) $ do
     (constraints, lookups) <- redeemTx account pk
-    utx <- mkTxConstraints lookups constraints
-    submitUnbalancedTx $ Constraints.adjustUnbalancedTx utx
+    mkTxConstraints lookups constraints >>= adjustUnbalancedTx >>= submitUnbalancedTx
 
 -- | @balance account@ returns the value of all unspent outputs that can be
 --   unlocked with @accountToken account@

@@ -29,7 +29,6 @@ import Data.ByteString.Char8 qualified as C
 import Data.Map (Map)
 import Data.Map qualified as Map
 import Data.Maybe (catMaybes)
-import Ledger (Address, Datum (Datum), ScriptContext, Validator, Value)
 import Ledger qualified
 import Ledger.Ada qualified as Ada
 import Ledger.Constraints qualified as Constraints
@@ -37,6 +36,7 @@ import Ledger.Tx (ChainIndexTxOut (..))
 import Ledger.Typed.Scripts qualified as Scripts
 import Playground.Contract
 import Plutus.Contract
+import Plutus.V1.Ledger.Api (Address, Datum (Datum), ScriptContext, Validator, Value)
 import PlutusTx qualified
 import PlutusTx.Prelude hiding (pure, (<$>))
 import Prelude qualified as Haskell
@@ -64,7 +64,7 @@ gameInstance :: Scripts.TypedValidator Game
 gameInstance = Scripts.mkTypedValidator @Game
     $$(PlutusTx.compile [|| validateGuess ||])
     $$(PlutusTx.compile [|| wrap ||]) where
-        wrap = Scripts.wrapValidator @HashedString @ClearString
+        wrap = Scripts.mkUntypedValidator @HashedString @ClearString
 
 -- create a data script for the guessing game by hashing the string
 -- and lifting the hash to its on-chain representation
@@ -121,7 +121,7 @@ guess = endpoint @"guess" @GuessParams $ \(GuessParams theGuess) -> do
     utxos <- fundsAtAddressGeq gameAddress (Ada.lovelaceValueOf 1)
 
     let redeemer = clearString theGuess
-        tx       = collectFromScript utxos redeemer
+        tx       = Constraints.collectFromTheScript utxos redeemer
 
     -- Log a message saying if the secret word was correctly guessed
     let hashedSecretWord = findSecretWordValue utxos
@@ -144,7 +144,7 @@ findSecretWordValue =
 -- | Extract the secret word in the Datum of a given transaction output is possible
 secretWordValue :: ChainIndexTxOut -> Maybe HashedString
 secretWordValue o = do
-  Datum d <- either (const Nothing) Just (_ciTxOutDatum o)
+  Datum d <- snd (_ciTxOutScriptDatum o)
   PlutusTx.fromBuiltinData d
 
 game :: AsContractError e => Contract () GameSchema e ()

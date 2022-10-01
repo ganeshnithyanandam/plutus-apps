@@ -20,12 +20,10 @@ import Data.Default (Default (def))
 import Data.Map qualified as Map
 import Data.Text qualified as T
 
-import Ledger (Address, POSIXTime, POSIXTimeRange, PaymentPubKeyHash (unPaymentPubKeyHash), Validator)
+import Ledger (PaymentPubKeyHash (unPaymentPubKeyHash))
 import Ledger.Ada qualified as Ada
 import Ledger.Constraints (TxConstraints, mustBeSignedBy, mustPayToTheScript, mustValidateIn)
 import Ledger.Constraints qualified as Constraints
-import Ledger.Contexts (ScriptContext (..), TxInfo (..))
-import Ledger.Contexts qualified as Validation
 import Ledger.Interval qualified as Interval
 import Ledger.TimeSlot qualified as TimeSlot
 import Ledger.Tx qualified as Tx
@@ -35,7 +33,9 @@ import Ledger.Value qualified as Value
 import Playground.Contract
 import Plutus.Contract
 import Plutus.Contract.Test
-import Plutus.Contract.Typed.Tx qualified as Typed
+import Plutus.V1.Ledger.Api (Address, POSIXTime, POSIXTimeRange, Validator)
+import Plutus.V1.Ledger.Contexts (ScriptContext (..), TxInfo (..))
+import Plutus.V1.Ledger.Contexts qualified as Validation
 import PlutusTx qualified
 import PlutusTx.Prelude hiding (Semigroup (..), fold)
 import Prelude as Haskell (Semigroup (..), show)
@@ -141,9 +141,9 @@ typedValidator = Scripts.mkTypedValidatorParam @Vesting
     $$(PlutusTx.compile [|| validate ||])
     $$(PlutusTx.compile [|| wrap ||])
     where
-        wrap = Scripts.wrapValidator
+        wrap = Scripts.mkUntypedValidator
 
-contractAddress :: VestingParams -> Ledger.Address
+contractAddress :: VestingParams -> Address
 contractAddress = Scripts.validatorAddress . typedValidator
 
 vestingContract :: VestingParams -> Contract () VestingSchema T.Text ()
@@ -164,8 +164,8 @@ vestFundsC
     -> Contract () s T.Text ()
 vestFundsC vesting = do
     let txn = payIntoContract (totalAmount vesting)
-    mkTxConstraints (Constraints.typedValidatorLookups $ typedValidator vesting) txn
-      >>= void . submitUnbalancedTx . Constraints.adjustUnbalancedTx
+    mkTxConstraints (Constraints.plutusV1TypedValidatorLookups $ typedValidator vesting) txn
+      >>= adjustUnbalancedTx >>= void . submitUnbalancedTx
 
 data Liveness = Alive | Dead
 
@@ -176,12 +176,12 @@ retrieveFundsC
 retrieveFundsC vesting payment = do
     let inst = typedValidator vesting
         addr = Scripts.validatorAddress inst
-    nextTime <- awaitTime 0
+    now <- currentTime
     unspentOutputs <- utxosAt addr
     let
         currentlyLocked = foldMap (view Tx.ciTxOutValue) (Map.elems unspentOutputs)
         remainingValue = currentlyLocked - payment
-        mustRemainLocked = totalAmount vesting - availableAt vesting nextTime
+        mustRemainLocked = totalAmount vesting - availableAt vesting now
         maxPayment = currentlyLocked - mustRemainLocked
 
     when (remainingValue `Value.lt` mustRemainLocked)
@@ -200,16 +200,17 @@ retrieveFundsC vesting payment = do
         remainingOutputs = case liveness of
                             Alive -> payIntoContract remainingValue
                             Dead  -> mempty
-        txn = Typed.collectFromScript unspentOutputs ()
+        txn = Constraints.collectFromTheScript unspentOutputs ()
                 <> remainingOutputs
-                <> mustValidateIn (Interval.from nextTime)
+                <> mustValidateIn (Interval.from now)
                 <> mustBeSignedBy (vestingOwner vesting)
                 -- we don't need to add a pubkey output for 'vestingOwner' here
                 -- because this will be done by the wallet when it balances the
                 -- transaction.
-    mkTxConstraints (Constraints.typedValidatorLookups inst
+    void $ waitNSlots 1 -- wait until we reach a slot in the validity range
+    mkTxConstraints (Constraints.plutusV1TypedValidatorLookups inst
                   <> Constraints.unspentOutputs unspentOutputs) txn
-      >>= void . submitUnbalancedTx . Constraints.adjustUnbalancedTx
+      >>= adjustUnbalancedTx >>= void . submitUnbalancedTx
     return liveness
 
 endpoints :: Contract () VestingSchema T.Text ()

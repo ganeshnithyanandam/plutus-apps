@@ -27,15 +27,14 @@ import GHC.Generics (Generic)
 import Ledger (POSIXTime, PaymentPubKeyHash (unPaymentPubKeyHash), TxId, getCardanoTxId, txSignedBy, valuePaidTo)
 import Ledger qualified
 import Ledger.Constraints qualified as Constraints
-import Ledger.Contexts (ScriptContext (..), TxInfo (..))
 import Ledger.Interval (after, before)
 import Ledger.Interval qualified as Interval
 import Ledger.Tx qualified as Tx
 import Ledger.Typed.Scripts qualified as Scripts
 import Ledger.Value (Value, geq)
+import Plutus.V1.Ledger.Api (ScriptContext (..), TxInfo (..))
 
 import Plutus.Contract
-import Plutus.Contract.Typed.Tx qualified as Typed
 import PlutusTx qualified
 import PlutusTx.Prelude hiding (Applicative (..), Semigroup (..), check, foldMap)
 
@@ -100,7 +99,7 @@ escrowInstance = Scripts.mkTypedValidator @Escrow
     $$(PlutusTx.compile [|| validate ||])
     $$(PlutusTx.compile [|| wrap ||])
       where
-        wrap = Scripts.wrapValidator @EscrowParams @Action
+        wrap = Scripts.mkUntypedValidator @EscrowParams @Action
 
 {-# INLINABLE validate #-}
 validate :: EscrowParams -> Action -> ScriptContext -> Bool
@@ -126,11 +125,12 @@ validate params action ScriptContext{scriptContextTxInfo=txInfo} =
 -- requirement that the transaction validates before the 'deadline'.
 lockEp :: Promise () EscrowSchema EscrowError ()
 lockEp = endpoint @"lock" $ \params -> do
-  let valRange = Interval.to (Haskell.pred $ deadline params)
+  -- We have to do 'pred' twice, see Note [Validity Interval's upper bound]
+  let valRange = Interval.to (Haskell.pred $ Haskell.pred $ deadline params)
       tx = Constraints.mustPayToTheScript params (paying params)
             <> Constraints.mustValidateIn valRange
-  void $ mkTxConstraints (Constraints.typedValidatorLookups escrowInstance) tx
-         >>= submitUnbalancedTx . Constraints.adjustUnbalancedTx
+  void $ mkTxConstraints (Constraints.plutusV1TypedValidatorLookups escrowInstance) tx
+         >>= adjustUnbalancedTx >>= submitUnbalancedTx
 
 -- | Attempts to redeem the 'Value' locked into this script by paying in from
 -- the callers address to the payee.
@@ -139,12 +139,13 @@ redeemEp = endpoint @"redeem" redeem
   where
     redeem params = do
       time <- currentTime
-      pk <- ownPaymentPubKeyHash
+      pk <- ownFirstPaymentPubKeyHash
       unspentOutputs <- utxosAt escrowAddress
 
       let value = foldMap (view Tx.ciTxOutValue) unspentOutputs
-          tx = Typed.collectFromScript unspentOutputs Redeem
-                      <> Constraints.mustValidateIn (Interval.to (Haskell.pred $ deadline params))
+          tx = Constraints.collectFromTheScript unspentOutputs Redeem
+                      -- We have to do 'pred' twice, see Note [Validity Interval's upper bound]
+                      <> Constraints.mustValidateIn (Interval.to (Haskell.pred $ Haskell.pred $ deadline params))
                       -- Pay me the output of this script
                       <> Constraints.mustPayToPubKey pk value
                       -- Pay the payee their due
@@ -153,10 +154,9 @@ redeemEp = endpoint @"redeem" redeem
       if time >= deadline params
       then throwing _RedeemFailed DeadlinePassed
       else do
-        utx <- Constraints.adjustUnbalancedTx
-           <$> mkTxConstraints ( Constraints.typedValidatorLookups escrowInstance
+        utx <- mkTxConstraints ( Constraints.plutusV1TypedValidatorLookups escrowInstance
                               <> Constraints.unspentOutputs unspentOutputs
-                               ) tx
+                               ) tx >>= adjustUnbalancedTx
         RedeemSuccess . getCardanoTxId <$> submitUnbalancedTx utx
 
 -- | Refunds the locked amount back to the 'payee'.
@@ -166,15 +166,15 @@ refundEp = endpoint @"refund" refund
     refund params = do
       unspentOutputs <- utxosAt escrowAddress
 
-      let tx = Typed.collectFromScript unspentOutputs Refund
+      let tx = Constraints.collectFromTheScript unspentOutputs Refund
                   <> Constraints.mustValidateIn (Interval.from (deadline params))
+                  <> Constraints.mustBeSignedBy (payee params)
 
       if Constraints.modifiesUtxoSet tx
       then do
-        utx <- Constraints.adjustUnbalancedTx
-           <$> mkTxConstraints ( Constraints.typedValidatorLookups escrowInstance
+        utx <- mkTxConstraints ( Constraints.plutusV1TypedValidatorLookups escrowInstance
                               <> Constraints.unspentOutputs unspentOutputs
-                               ) tx
+                               ) tx >>= adjustUnbalancedTx
         RefundSuccess . getCardanoTxId <$> submitUnbalancedTx utx
       else throwing _RefundFailed ()
 

@@ -16,12 +16,13 @@ module Plutus.Contracts.Uniswap.OnChain
     ) where
 
 import Ledger
-import Ledger.Constraints.OnChain as Constraints
-import Ledger.Constraints.TxConstraints as Constraints
+import Ledger.Constraints as Constraints
+import Ledger.Constraints.OnChain.V1 as Constraints
 import Ledger.Value (AssetClass (..), symbols)
 import Plutus.Contracts.Uniswap.Pool (calculateAdditionalLiquidity, calculateInitialLiquidity, calculateRemoval,
                                       checkSwap, lpTicker)
 import Plutus.Contracts.Uniswap.Types
+import Plutus.V1.Ledger.Scripts (Datum (Datum), DatumHash)
 import PlutusTx qualified
 import PlutusTx.Prelude
 

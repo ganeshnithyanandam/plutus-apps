@@ -19,9 +19,15 @@ module Ledger.CardanoWallet(
     fromSeed,
     fromSeed',
     -- ** Keys
+    mockWalletAddress,
     paymentPrivateKey,
     paymentPubKeyHash,
-    paymentPubKey
+    paymentPubKey,
+    stakePubKeyHash,
+    stakePubKey,
+    knownPaymentKeys,
+    knownPaymentPublicKeys,
+    knownPaymentPrivateKeys
     ) where
 
 import Cardano.Crypto.Wallet qualified as Crypto
@@ -33,13 +39,17 @@ import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BSL
 import Data.Hashable (Hashable (..))
 import Data.List (findIndex)
+import Data.Map qualified as Map
 import Data.Maybe (fromMaybe)
 import Data.Text qualified as T
 import GHC.Generics (Generic)
-import Ledger (PaymentPrivateKey (PaymentPrivateKey), PaymentPubKey (PaymentPubKey, unPaymentPubKey),
-               PaymentPubKeyHash (PaymentPubKeyHash))
+import Ledger.Address (PaymentPrivateKey (PaymentPrivateKey, unPaymentPrivateKey),
+                       PaymentPubKey (PaymentPubKey, unPaymentPubKey),
+                       PaymentPubKeyHash (PaymentPubKeyHash, unPaymentPubKeyHash),
+                       StakePubKey (StakePubKey, unStakePubKey), StakePubKeyHash (StakePubKeyHash, unStakePubKeyHash))
 import Ledger.Crypto (PubKey (..))
 import Ledger.Crypto qualified as Crypto
+import Plutus.V1.Ledger.Api (Address (Address), Credential (PubKeyCredential), StakingCredential (StakingHash))
 import Plutus.V1.Ledger.Bytes (LedgerBytes (getLedgerBytes))
 import Servant.API (FromHttpApiData, ToHttpApiData)
 
@@ -108,6 +118,11 @@ knownMockWallets = fromWalletNumber . WalletNumber <$> [1..10]
 knownMockWallet :: Integer -> MockWallet
 knownMockWallet = (knownMockWallets !!) . pred . fromInteger
 
+mockWalletAddress :: MockWallet -> Address
+mockWalletAddress mw =
+    Address (PubKeyCredential $ unPaymentPubKeyHash $ paymentPubKeyHash mw)
+            (StakingHash . PubKeyCredential . unStakePubKeyHash <$> stakePubKeyHash mw)
+
 -- | Mock wallet's private key
 paymentPrivateKey :: MockWallet -> PaymentPrivateKey
 paymentPrivateKey = PaymentPrivateKey . unMockPrivateKey . mwPaymentKey
@@ -119,3 +134,22 @@ paymentPubKeyHash = PaymentPubKeyHash . Crypto.pubKeyHash . unPaymentPubKey . pa
 -- | The mock wallet's payment public key
 paymentPubKey :: MockWallet -> PaymentPubKey
 paymentPubKey = PaymentPubKey . Crypto.toPublicKey . unMockPrivateKey . mwPaymentKey
+
+-- | The mock wallet's stake public key hash
+stakePubKeyHash :: MockWallet -> Maybe StakePubKeyHash
+stakePubKeyHash w = StakePubKeyHash . Crypto.pubKeyHash . unStakePubKey <$> stakePubKey w
+
+-- | The mock wallet's stake public key
+stakePubKey :: MockWallet -> Maybe StakePubKey
+stakePubKey w = StakePubKey . Crypto.toPublicKey . unMockPrivateKey <$> mwStakeKey w
+
+knownPaymentPublicKeys :: [PaymentPubKey]
+knownPaymentPublicKeys =
+    PaymentPubKey . Crypto.toPublicKey . unPaymentPrivateKey <$> knownPaymentPrivateKeys
+
+knownPaymentKeys :: Map.Map PaymentPubKey PaymentPrivateKey
+knownPaymentKeys = Map.fromList $ map
+    (\k -> (PaymentPubKey $ Crypto.toPublicKey $ unPaymentPrivateKey k, k)) knownPaymentPrivateKeys
+
+knownPaymentPrivateKeys :: [PaymentPrivateKey]
+knownPaymentPrivateKeys = paymentPrivateKey <$> knownMockWallets

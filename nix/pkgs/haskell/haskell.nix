@@ -47,6 +47,8 @@ let
         ({ pkgs, ... }: lib.mkIf (pkgs.stdenv.hostPlatform != pkgs.stdenv.buildPlatform) {
           packages = {
             # Things that need plutus-tx-plugin
+            pab-blockfrost.package.buildable = false;
+            marconi.package.buildable = false;
             playground-common.package.buildable = false;
             plutus-benchmark.package.buildable = false;
             plutus-chain-index.package.buildable = false;
@@ -59,6 +61,9 @@ let
             plutus-pab.package.buildable = false;
             plutus-pab-executables.package.buildable = false;
             plutus-playground-server.package.buildable = false; # Would also require libpq
+            plutus-script-utils.package.buildable = false;
+            plutus-streaming.package.buildable = false;
+            plutus-tx-constraints.package.buildable = false;
             plutus-tx-plugin.package.buildable = false;
             plutus-use-cases.package.buildable = false;
             plutus-example.package.buildable = false;
@@ -101,6 +106,26 @@ let
         )
         ({ pkgs, config, ... }: {
           packages = {
+            marconi.doHaddock = deferPluginErrors;
+            marconi.flags.defer-plugin-errors = deferPluginErrors;
+
+            # The lines `export CARDANO_NODE=...` and `export CARDANO_CLI=...`
+            # is necessary to prevent the error
+            # `../dist-newstyle/cache/plan.json: openBinaryFile: does not exist (No such file or directory)`.
+            # See https://github.com/input-output-hk/cardano-node/issues/4194
+            #
+            # The line 'export CARDANO_NODE_SRC=...' is used to specify the
+            # root folder used to fetch the `configuration.yaml` file (in
+            # plutus-apps, it's currently in the
+            # `configuration/defaults/byron-mainnet` directory.
+            # Else, we'll get the error
+            # `/nix/store/ls0ky8x6zi3fkxrv7n4vs4x9czcqh1pb-plutus-apps/marconi/test/configuration.yaml: openFile: does not exist (No such file or directory)`
+            marconi.preCheck = "
+              export CARDANO_CLI=${config.hsPkgs.cardano-cli.components.exes.cardano-cli}/bin/cardano-cli${pkgs.stdenv.hostPlatform.extensions.executable}
+              export CARDANO_NODE=${config.hsPkgs.cardano-node.components.exes.cardano-node}/bin/cardano-node${pkgs.stdenv.hostPlatform.extensions.executable}
+              export CARDANO_NODE_SRC=${src}
+            ";
+
             plutus-contract.doHaddock = deferPluginErrors;
             plutus-contract.flags.defer-plugin-errors = deferPluginErrors;
 
@@ -109,6 +134,9 @@ let
 
             plutus-ledger.doHaddock = deferPluginErrors;
             plutus-ledger.flags.defer-plugin-errors = deferPluginErrors;
+
+            plutus-script-utils.doHaddock = deferPluginErrors;
+            plutus-script-utils.flags.defer-plugin-errors = deferPluginErrors;
 
             plutus-example.doHaddock = deferPluginErrors;
             plutus-example.flags.defer-plugin-errors = deferPluginErrors;
@@ -136,18 +164,23 @@ let
             iohk-monitoring.doHaddock = false;
 
             # Werror everything. This is a pain, see https://github.com/input-output-hk/haskell.nix/issues/519
+            pab-blockfrost.ghcOptions = [ "-Werror" ];
+            marconi.ghcOptions = [ "-Werror" ];
             playground-common.ghcOptions = [ "-Werror" ];
             plutus-chain-index.ghcOptions = [ "-Werror" ];
             plutus-chain-index-core.ghcOptions = [ "-Werror" ];
             plutus-contract.ghcOptions = [ "-Werror" ];
+            plutus-doc.ghcOptions = [ "-Werror" ];
+            plutus-example.ghcOptions = [ "-Werror" ];
             plutus-ledger.ghcOptions = [ "-Werror" ];
             plutus-ledger-constraints.ghcOptions = [ "-Werror" ];
             plutus-playground-server.ghcOptions = [ "-Werror" ];
             plutus-pab.ghcOptions = [ "-Werror" ];
             plutus-pab-executables.ghcOptions = [ "-Werror" ];
-            plutus-doc.ghcOptions = [ "-Werror" ];
+            plutus-script-utils.ghcOptions = [ "-Werror" ];
+            plutus-tx-constraints.ghcOptions = [ "-Werror" ];
             plutus-use-cases.ghcOptions = [ "-Werror" ];
-            plutus-example.ghcOptions = [ "-Werror" ];
+            rewindable-index.ghcOptions = [ "-Werror" ];
 
             # Honestly not sure why we need this, it has a mysterious unused dependency on "m"
             # This will go away when we upgrade nixpkgs and things use ieee754 anyway.

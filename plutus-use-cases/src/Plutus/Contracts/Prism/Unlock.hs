@@ -81,7 +81,7 @@ subscribeSTO = forever $ handleError (const $ return ()) $ awaitPromise $
                 <> Constraints.mustPayToPubKey wSTOIssuer (Ada.lovelaceValueOf wSTOAmount)
                 <> credConstraints
             lookups =
-                Constraints.mintingPolicy (STO.policy stoData)
+                Constraints.plutusV1MintingPolicy (STO.policy stoData)
                 <> credLookups
         mapError WithdrawTxError
             $ submitTxConstraintsWith lookups constraints >>= awaitTxConfirmed . getCardanoTxId
@@ -95,7 +95,7 @@ unlockExchange :: forall w s.
     )
     => Contract w s UnlockError ()
 unlockExchange = awaitPromise $ endpoint @"unlock from exchange" $ \credential -> do
-    ownPK <- mapError WithdrawPkError ownPaymentPubKeyHash
+    ownPK <- mapError WithdrawPkError ownFirstPaymentPubKeyHash
     (credConstraints, credLookups) <- obtainCredentialTokenData credential
     (accConstraints, accLookups) <-
         mapError UnlockExchangeTokenAccError
@@ -115,7 +115,7 @@ obtainCredentialTokenData credential = do
     -- credentialManager <- mapError WithdrawEndpointError $ endpoint @"credential manager"
     userCredential <- mapError WithdrawPkError $
         UserCredential
-            <$> ownPaymentPubKeyHash
+            <$> ownFirstPaymentPubKeyHash
             <*> pure credential
             <*> pure (Credential.token credential)
 

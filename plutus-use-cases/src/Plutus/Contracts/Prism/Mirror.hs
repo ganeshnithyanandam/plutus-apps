@@ -58,7 +58,7 @@ mirror ::
     => Contract w s MirrorError ()
 mirror = do
     logInfo @String "mirror started"
-    authority <- mapError SetupError $ CredentialAuthority <$> ownPaymentPubKeyHash
+    authority <- mapError SetupError $ CredentialAuthority <$> ownFirstPaymentPubKeyHash
     forever $ do
         logInfo @String "waiting for 'issue' call"
         selectList [createTokens authority, revokeToken authority]
@@ -71,7 +71,7 @@ createTokens ::
 createTokens authority = endpoint @"issue" $ \CredentialOwnerReference{coTokenName, coOwner} -> do
     logInfo @String "Endpoint 'issue' called"
     let pk      = Credential.unCredentialAuthority authority
-        lookups = Constraints.mintingPolicy (Credential.policy authority)
+        lookups = Constraints.plutusV1MintingPolicy (Credential.policy authority)
                 <> Constraints.ownPaymentPubKeyHash pk
         theToken = Credential.token Credential{credAuthority=authority,credName=coTokenName}
         constraints =
@@ -80,7 +80,7 @@ createTokens authority = endpoint @"issue" $ \CredentialOwnerReference{coTokenNa
             <> Constraints.mustPayToPubKey pk (Ada.lovelaceValueOf 1)   -- Add self-spend to force an input
     _ <- mapError CreateTokenTxError $ do
             mkTxConstraints @Scripts.Any lookups constraints
-              >>= submitTxConfirmed . Constraints.adjustUnbalancedTx
+              >>= adjustUnbalancedTx >>= submitTxConfirmed
     let stateMachine = StateMachine.mkMachineClient authority (mockWalletPaymentPubKeyHash coOwner) coTokenName
     void $ mapError StateMachineError $ SM.runInitialise stateMachine Active theToken
 
@@ -91,14 +91,14 @@ revokeToken ::
     -> Promise w s MirrorError ()
 revokeToken authority = endpoint @"revoke" $ \CredentialOwnerReference{coTokenName, coOwner} -> do
     let stateMachine = StateMachine.mkMachineClient authority (mockWalletPaymentPubKeyHash coOwner) coTokenName
-        lookups = Constraints.mintingPolicy (Credential.policy authority) <>
+        lookups = Constraints.plutusV1MintingPolicy (Credential.policy authority) <>
                   Constraints.ownPaymentPubKeyHash  (Credential.unCredentialAuthority authority)
     t <- mapError StateMachineError $ SM.mkStep stateMachine RevokeCredential
     case t of
         Left{} -> return () -- Ignore invalid transitions
         Right StateMachineTransition{smtConstraints=constraints, smtLookups=lookups'} -> do
             mkTxConstraints (lookups <> lookups') constraints
-              >>= submitTxConfirmed . Constraints.adjustUnbalancedTx
+              >>= adjustUnbalancedTx >>= submitTxConfirmed
 
 ---
 -- Errors and Logging

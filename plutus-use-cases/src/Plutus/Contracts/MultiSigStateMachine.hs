@@ -37,12 +37,12 @@ import Ledger (POSIXTime, PaymentPubKeyHash (unPaymentPubKeyHash))
 import Ledger.Ada qualified as Ada
 import Ledger.Constraints (TxConstraints)
 import Ledger.Constraints qualified as Constraints
-import Ledger.Contexts (ScriptContext (..), TxInfo (..))
-import Ledger.Contexts qualified as Validation
 import Ledger.Interval qualified as Interval
 import Ledger.Typed.Scripts qualified as Scripts
 import Ledger.Value (Value)
 import Ledger.Value qualified as Value
+import Plutus.V1.Ledger.Api (ScriptContext (..), TxInfo (..))
+import Plutus.V1.Ledger.Contexts qualified as Validation
 
 import Plutus.Contract
 import Plutus.Contract.StateMachine (AsSMContractError, State (..), StateMachine (..), Void)
@@ -222,7 +222,8 @@ transition params State{ stateData =s, stateValue=currentValue} i = case (s, i) 
         | proposalAccepted params pkh ->
             let Payment{paymentAmount, paymentRecipient, paymentDeadline} = payment
                 constraints =
-                    Constraints.mustValidateIn (Interval.to $ paymentDeadline - 1)
+                    -- We have to subtract '2', see Note [Validity Interval's upper bound]
+                    Constraints.mustValidateIn (Interval.to $ paymentDeadline - 2)
                     <> Constraints.mustPayToPubKey paymentRecipient paymentAmount
                 newValue = currentValue - paymentAmount
             in Just ( constraints
@@ -252,7 +253,7 @@ typedValidator = Scripts.mkTypedValidatorParam @MultiSigSym
     $$(PlutusTx.compile [|| mkValidator ||])
     $$(PlutusTx.compile [|| wrap ||])
     where
-        wrap = Scripts.wrapValidator
+        wrap = Scripts.mkUntypedValidator
 
 client :: Params -> SM.StateMachineClient MSState Input
 client params = SM.mkStateMachineClient $ SM.StateMachineInstance (machine params) (typedValidator params)
@@ -268,7 +269,7 @@ contract params = forever endpoints where
     endpoints = selectList [lock, propose, cancel, addSignature, pay]
     propose = endpoint @"propose-payment" $ void . SM.runStep theClient . ProposePayment
     cancel  = endpoint @"cancel-payment" $ \() -> void $ SM.runStep theClient Cancel
-    addSignature = endpoint @"add-signature" $ \() -> ownPaymentPubKeyHash >>= void . SM.runStep theClient . AddSignature
+    addSignature = endpoint @"add-signature" $ \() -> ownFirstPaymentPubKeyHash >>= void . SM.runStep theClient . AddSignature
     lock = endpoint @"lock" $ void . SM.runInitialise theClient Holding
     pay = endpoint @"pay" $ \() -> void $ SM.runStep theClient Pay
 

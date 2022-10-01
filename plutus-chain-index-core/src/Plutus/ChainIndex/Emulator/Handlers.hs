@@ -7,6 +7,7 @@
 {-# LANGUAGE NamedFieldPuns    #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TemplateHaskell   #-}
+{-# LANGUAGE TupleSections     #-}
 {-# LANGUAGE TypeApplications  #-}
 {-# LANGUAGE TypeOperators     #-}
 {-| Handlers for the 'ChainIndexQueryEffect' and the 'ChainIndexControlEffect'
@@ -25,19 +26,17 @@ import Control.Monad (foldM)
 import Control.Monad.Freer (Eff, Member, type (~>))
 import Control.Monad.Freer.Error (Error, throwError)
 import Control.Monad.Freer.Extras.Log (LogMsg, logDebug, logError, logWarn)
-import Control.Monad.Freer.Extras.Pagination (pageOf)
+import Control.Monad.Freer.Extras.Pagination (Page (nextPageQuery, pageItems), PageQuery, pageOf)
 import Control.Monad.Freer.State (State, get, gets, modify, put)
-import Data.Maybe (catMaybes, fromMaybe)
+import Data.List qualified as List
+import Data.Maybe (catMaybes, fromMaybe, maybeToList)
 import Data.Semigroup.Generic (GenericSemigroupMonoid (..))
 import Data.Set qualified as Set
 import GHC.Generics (Generic)
-import Ledger (Address (addressCredential), ChainIndexTxOut (..), MintingPolicy (MintingPolicy),
-               MintingPolicyHash (MintingPolicyHash), StakeValidator (StakeValidator),
-               StakeValidatorHash (StakeValidatorHash), TxId, TxOut (txOutAddress), TxOutRef (..),
-               Validator (Validator), ValidatorHash (ValidatorHash), txOutDatumHash, txOutValue)
+import Ledger (Address (addressCredential), ChainIndexTxOut (..), TxId, TxOut, TxOutRef (..))
 import Ledger.Scripts (ScriptHash (ScriptHash))
-import Plutus.ChainIndex.Api (IsUtxoResponse (IsUtxoResponse), TxosResponse (TxosResponse),
-                              UtxosResponse (UtxosResponse))
+import Plutus.ChainIndex.Api (IsUtxoResponse (IsUtxoResponse), QueryResponse (QueryResponse),
+                              TxosResponse (TxosResponse), UtxosResponse (UtxosResponse))
 import Plutus.ChainIndex.ChainIndexError (ChainIndexError (..))
 import Plutus.ChainIndex.ChainIndexLog (ChainIndexLog (..))
 import Plutus.ChainIndex.Effects (ChainIndexControlEffect (..), ChainIndexQueryEffect (..))
@@ -50,7 +49,10 @@ import Plutus.ChainIndex.Types (ChainSyncBlock (..), Diagnostics (..), Point (Po
                                 TxProcessOption (..), TxUtxoBalance (..))
 import Plutus.ChainIndex.UtxoState (InsertUtxoSuccess (..), RollbackResult (..), UtxoIndex, tip, utxoState)
 import Plutus.ChainIndex.UtxoState qualified as UtxoState
-import Plutus.V1.Ledger.Api (Credential (PubKeyCredential, ScriptCredential))
+import Plutus.V1.Ledger.Api (Credential (PubKeyCredential, ScriptCredential), Datum, DatumHash,
+                             MintingPolicy (MintingPolicy), MintingPolicyHash (MintingPolicyHash), Script,
+                             StakeValidator (StakeValidator), StakeValidatorHash (StakeValidatorHash), TxOut (TxOut),
+                             Validator (Validator), ValidatorHash (ValidatorHash))
 
 data ChainIndexEmulatorState =
     ChainIndexEmulatorState
@@ -61,6 +63,22 @@ data ChainIndexEmulatorState =
         deriving (Semigroup, Monoid) via (GenericSemigroupMonoid ChainIndexEmulatorState)
 
 makeLenses ''ChainIndexEmulatorState
+
+getDatumFromHash ::
+    forall effs.
+    ( Member (State ChainIndexEmulatorState) effs
+    )
+    => DatumHash
+    -> Eff effs (Maybe Datum)
+getDatumFromHash h = gets (view $ diskState . dataMap . at h)
+
+getScriptFromHash ::
+    forall effs.
+    ( Member (State ChainIndexEmulatorState) effs
+    )
+    => ScriptHash
+    -> Eff effs (Maybe Script)
+getScriptFromHash h = gets (view $ diskState . scriptMap . at h)
 
 -- | Get the 'ChainIndexTx' for a transaction ID
 getTxFromTxId ::
@@ -87,23 +105,69 @@ getTxOutFromRef ref@TxOutRef{txOutRefId, txOutRefIdx} = do
   ds <- gets (view diskState)
   -- Find the output in the tx matching the output ref
   case preview (txMap . ix txOutRefId . citxOutputs . _ValidTx . ix (fromIntegral txOutRefIdx)) ds of
-    Nothing -> logWarn (TxOutNotFound ref) >> pure Nothing
-    Just txout -> do
-      -- The output might come from a public key address or a script address.
-      -- We need to handle them differently.
-      case addressCredential $ txOutAddress txout of
-        PubKeyCredential _ ->
-          pure $ Just $ PublicKeyChainIndexTxOut (txOutAddress txout) (txOutValue txout)
-        ScriptCredential vh@(ValidatorHash h) -> do
-          case txOutDatumHash txout of
-            Nothing -> do
-              -- If the txout comes from a script address, the Datum should not be Nothing
-              logWarn $ NoDatumScriptAddr txout
-              pure Nothing
-            Just dh -> do
-              let v = maybe (Left vh) (Right . Validator) $ preview (scriptMap . ix (ScriptHash h)) ds
-              let d = maybe (Left dh) Right $ preview (dataMap . ix dh) ds
-              pure $ Just $ ScriptChainIndexTxOut (txOutAddress txout) v d (txOutValue txout)
+    Nothing    -> logWarn (TxOutNotFound ref) >> pure Nothing
+    Just txout -> makeChainIndexTxOut txout
+
+-- | Get the 'ChainIndexTxOut' for a 'TxOutRef'.
+getUtxoutFromRef ::
+  forall effs.
+  ( Member (State ChainIndexEmulatorState) effs
+  , Member (LogMsg ChainIndexLog) effs
+  )
+  => TxOutRef
+  -> Eff effs (Maybe ChainIndexTxOut)
+getUtxoutFromRef ref@TxOutRef{txOutRefId, txOutRefIdx} = do
+  ds <- gets (view diskState)
+  -- Find the output in the tx matching the output ref
+  case preview (txMap . ix txOutRefId . citxOutputs . _ValidTx . ix (fromIntegral txOutRefIdx)) ds of
+    Nothing    -> logWarn (TxOutNotFound ref) >> pure Nothing
+    Just txout -> do makeChainIndexTxOut txout
+
+makeChainIndexTxOut ::
+  forall effs.
+  ( Member (State ChainIndexEmulatorState) effs
+  , Member (LogMsg ChainIndexLog) effs
+  )
+  => TxOut
+  -> Eff effs (Maybe ChainIndexTxOut)
+makeChainIndexTxOut txout@(TxOut address value dh) = do
+  case addressCredential address of
+    PubKeyCredential _ -> do
+      d <- maybe (pure Nothing) getDatumFromHash dh
+      pure $ Just $ PublicKeyChainIndexTxOut address value ((, d) <$> dh)
+    ScriptCredential (ValidatorHash vh) ->
+      case dh of
+        Just h -> do
+          v <- getScriptFromHash (ScriptHash vh)
+          d <- getDatumFromHash h
+          pure $ Just $ ScriptChainIndexTxOut address value (h, d) (ValidatorHash vh, Validator <$> v)
+        Nothing -> do
+          -- If the txout comes from a script address, the Datum should not be Nothing
+          logWarn $ NoDatumScriptAddr txout
+          pure Nothing
+
+-- | Unspent outputs located at addresses with the given credential.
+getUtxoSetAtAddress ::
+  forall effs.
+  ( Member (State ChainIndexEmulatorState) effs
+  , Member (LogMsg ChainIndexLog) effs
+  )
+  => PageQuery TxOutRef
+  -> Credential
+  -> Eff effs UtxosResponse
+getUtxoSetAtAddress pageQuery cred = do
+  state <- get
+  let outRefs = view (diskState . addressMap . at cred) state
+      utxo = view (utxoIndex . to utxoState) state
+      utxoRefs = Set.filter (flip TxUtxoBalance.isUnspentOutput utxo)
+                            (fromMaybe mempty outRefs)
+      page = pageOf pageQuery utxoRefs
+  case tip utxo of
+    TipAtGenesis -> do
+      logWarn TipIsGenesis
+      pure (UtxosResponse TipAtGenesis (pageOf pageQuery Set.empty))
+    tp           -> pure (UtxosResponse tp page)
+
 
 handleQuery ::
     forall effs.
@@ -113,13 +177,13 @@ handleQuery ::
     ) => ChainIndexQueryEffect
     ~> Eff effs
 handleQuery = \case
-    DatumFromHash h -> gets (view $ diskState . dataMap . at h)
+    DatumFromHash h -> getDatumFromHash h
     ValidatorFromHash (ValidatorHash h) ->  do
-      gets (fmap (fmap Validator) . view $ diskState . scriptMap . at (ScriptHash h))
+      fmap (fmap Validator) $ getScriptFromHash (ScriptHash h)
     MintingPolicyFromHash (MintingPolicyHash h) ->
-      gets (fmap (fmap MintingPolicy) . view $ diskState . scriptMap . at (ScriptHash h))
+      fmap (fmap MintingPolicy) $ getScriptFromHash (ScriptHash h)
     StakeValidatorFromHash (StakeValidatorHash h) ->
-      gets (fmap (fmap StakeValidator) . view $ diskState . scriptMap . at (ScriptHash h))
+      fmap (fmap StakeValidator) $ getScriptFromHash (ScriptHash h)
     UnspentTxOutFromRef ref -> getTxOutFromRef ref
     TxOutFromRef ref -> getTxOutFromRef ref
     RedeemerFromHash h -> gets (view $ diskState . redeemerMap . at h)
@@ -129,18 +193,17 @@ handleQuery = \case
         case tip utxo of
             TipAtGenesis -> throwError QueryFailedNoTip
             tp           -> pure (IsUtxoResponse tp (TxUtxoBalance.isUnspentOutput r utxo))
-    UtxoSetAtAddress pageQuery cred -> do
-        state <- get
-        let outRefs = view (diskState . addressMap . at cred) state
-            utxo = view (utxoIndex . to utxoState) state
-            utxoRefs = Set.filter (flip TxUtxoBalance.isUnspentOutput utxo)
-                                  (fromMaybe mempty outRefs)
-            page = pageOf pageQuery utxoRefs
-        case tip utxo of
-            TipAtGenesis -> do
-                logWarn TipIsGenesis
-                pure (UtxosResponse TipAtGenesis (pageOf pageQuery Set.empty))
-            tp           -> pure (UtxosResponse tp page)
+    UtxoSetAtAddress pageQuery cred -> getUtxoSetAtAddress pageQuery cred
+    UnspentTxOutSetAtAddress pageQuery cred -> do
+        (UtxosResponse tp page) <- getUtxoSetAtAddress pageQuery cred
+        case tp of
+          TipAtGenesis -> do
+            pure $ QueryResponse [] Nothing
+          _            -> do
+            mtxouts <- mapM getUtxoutFromRef (pageItems page)
+            let txouts = [ (t, o) | (t, mo) <- List.zip (pageItems page) mtxouts, o <- maybeToList mo]
+            pure $ QueryResponse txouts (nextPageQuery page)
+
     UtxoSetWithCurrency pageQuery assetClass -> do
         state <- get
         let outRefs = view (diskState . assetClassMap . at assetClass) state
@@ -177,14 +240,16 @@ appendBlocks [] = pure ()
 appendBlocks blocks = do
     let
         processBlock (utxoIndexState, txs) (Block tip_ transactions) = do
-            case UtxoState.insert (TxUtxoBalance.fromBlock tip_ (map fst transactions)) utxoIndexState of
-                Left err -> do
-                    let reason = InsertionFailed err
-                    logError $ Err reason
-                    return (utxoIndexState, txs)
-                Right InsertUtxoSuccess{newIndex, insertPosition} -> do
-                    logDebug $ InsertionSuccess tip_ insertPosition
-                    return (newIndex, transactions ++ txs)
+            if null transactions then return (utxoIndexState, txs)
+            else do
+                case UtxoState.insert (TxUtxoBalance.fromBlock tip_ (map fst transactions)) utxoIndexState of
+                    Left err -> do
+                        let reason = InsertionFailed err
+                        logError $ Err reason
+                        return (utxoIndexState, txs)
+                    Right InsertUtxoSuccess{newIndex, insertPosition} -> do
+                        logDebug $ InsertionSuccess tip_ insertPosition
+                        return (newIndex, transactions ++ txs)
     oldState <- get @ChainIndexEmulatorState
     (newIndex, transactions) <- foldM processBlock (view utxoIndex oldState, []) blocks
     put $ oldState

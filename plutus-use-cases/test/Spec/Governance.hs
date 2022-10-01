@@ -9,7 +9,7 @@
 {-# OPTIONS_GHC -fno-ignore-interface-pragmas #-}
 module Spec.Governance(tests, doVoting) where
 
-import Control.Lens (view)
+import Control.Lens (view, (&))
 import Control.Monad (void)
 import Data.Foldable (traverse_)
 import Data.Maybe (listToMaybe)
@@ -23,7 +23,6 @@ import Plutus.Contract.Test
 import Plutus.Contracts.Governance qualified as Gov
 import Plutus.Trace.Emulator (EmulatorTrace)
 import Plutus.Trace.Emulator qualified as Trace
-import PlutusTx qualified
 import PlutusTx.Prelude (BuiltinByteString, fromBuiltin)
 
 import Test.Tasty (TestTree, testGroup)
@@ -32,22 +31,23 @@ import Test.Tasty.HUnit qualified as HUnit
 tests :: TestTree
 tests =
     testGroup "governance tests"
-    [ checkPredicate "vote all in favor, 2 rounds - SUCCESS"
+    [ checkPredicateOptions (defaultCheckOptions & increaseTransactionLimits) "vote all in favor, 2 rounds - SUCCESS"
         (assertNoFailedTransactions
         .&&. dataAtAddress (Scripts.validatorAddress $ Gov.typedValidator params) (maybe False ((== lawv3) . Gov.law) . listToMaybe))
         (doVoting 10 0 2)
 
-    , checkPredicate "vote 60/40, accepted - SUCCESS"
+    , checkPredicateOptions (defaultCheckOptions & increaseTransactionLimits) "vote 60/40, accepted - SUCCESS"
         (assertNoFailedTransactions
         .&&. dataAtAddress (Scripts.validatorAddress $ Gov.typedValidator params) (maybe False ((== lawv2) . Gov.law) . listToMaybe))
         (doVoting 6 4 1)
 
-    , checkPredicate "vote 50/50, rejected - SUCCESS"
+    , checkPredicateOptions (defaultCheckOptions & increaseTransactionLimits) "vote 50/50, rejected - SUCCESS"
         (assertNoFailedTransactions
         .&&. dataAtAddress (Scripts.validatorAddress $ Gov.typedValidator params) (maybe False ((== lawv1) . Gov.law) . listToMaybe ))
         (doVoting 5 5 1)
 
-    , goldenPir "test/Spec/governance.pir" $$(PlutusTx.compile [|| Gov.mkValidator ||])
+    -- TODO: turn this on again when reproducibility issue in core is fixed
+    -- , goldenPir "test/Spec/governance.pir" $$(PlutusTx.compile [|| Gov.mkValidator ||])
     , HUnit.testCase "script size is reasonable"
                      ( reasonable (Scripts.validatorScript $ Gov.typedValidator params)
                                   23000

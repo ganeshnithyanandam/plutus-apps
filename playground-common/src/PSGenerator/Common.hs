@@ -18,24 +18,22 @@ import Language.PureScript.Bridge (BridgePart, Language (Haskell), PSType, SumTy
 import Language.PureScript.Bridge.Builder (BridgeData)
 import Language.PureScript.Bridge.PSTypes (psInt, psNumber, psString)
 import Language.PureScript.Bridge.TypeParameters (A)
-import Ledger (Address, BlockId, CardanoTx, ChainIndexTxOut, DatumHash, MintingPolicy, OnChainTx, PaymentPubKey,
-               PaymentPubKeyHash, PubKey, PubKeyHash, RedeemerPtr, ScriptTag, Signature, StakePubKey, StakePubKeyHash,
-               StakeValidator, Tx, TxId, TxIn, TxInType, TxOut, TxOutRef, TxOutTx, UtxoIndex, ValidationPhase,
-               Validator)
+import Ledger (Address, BlockId, CardanoTx, ChainIndexTxOut, OnChainTx, PaymentPubKey, PaymentPubKeyHash, PubKey,
+               PubKeyHash, RedeemerPtr, ScriptTag, Signature, StakePubKey, StakePubKeyHash, Tx, TxId, TxIn, TxInType,
+               TxOut, TxOutRef, TxOutTx, UtxoIndex, ValidationPhase)
 import Ledger.Ada (Ada)
 import Ledger.Constraints.OffChain (MkTxError, UnbalancedTx)
 import Ledger.Credential (Credential, StakingCredential)
 import Ledger.DCert (DCert)
-import Ledger.Index (ExCPU, ExMemory, ScriptType, ScriptValidationEvent, ValidationError)
+import Ledger.Index (ExCPU, ExMemory, ValidationError)
 import Ledger.Interval (Extended, Interval, LowerBound, UpperBound)
 import Ledger.Scripts (ScriptError)
 import Ledger.Slot (Slot)
 import Ledger.TimeSlot (SlotConfig, SlotConversionError)
 import Ledger.Tx.CardanoAPI (FromCardanoError, ToCardanoError)
-import Ledger.Typed.Tx (ConnectionError, WrongOutTypeError)
 import Ledger.Value (AssetClass, CurrencySymbol, TokenName, Value)
 import Playground.Types (ContractCall, FunctionSchema, KnownCurrency)
-import Plutus.ChainIndex.Api (IsUtxoResponse, TxosResponse, UtxosResponse)
+import Plutus.ChainIndex.Api (IsUtxoResponse, QueryResponse, TxosResponse, UtxosResponse)
 import Plutus.ChainIndex.ChainIndexError (ChainIndexError)
 import Plutus.ChainIndex.ChainIndexLog (ChainIndexLog)
 import Plutus.ChainIndex.Tx (ChainIndexTx, ChainIndexTxOutputs)
@@ -46,10 +44,12 @@ import Plutus.Contract.Effects (ActiveEndpoint, BalanceTxResponse, ChainIndexQue
                                 WriteBalancedTxResponse)
 import Plutus.Contract.Error (AssertionError, ContractError, MatchingError)
 import Plutus.Contract.Resumable (IterationID, Request, RequestID, Response)
+import Plutus.Script.Utils.V1.Typed.Scripts (ConnectionError, WrongOutTypeError)
 import Plutus.Trace.Emulator.Types (ContractInstanceLog, ContractInstanceMsg, ContractInstanceTag, EmulatorRuntimeError,
                                     UserThreadMsg)
 import Plutus.Trace.Scheduler (Priority, SchedulerLog, StopReason, ThreadEvent, ThreadId)
 import Plutus.Trace.Tag (Tag)
+import Plutus.V1.Ledger.Api (DatumHash, MintingPolicy, StakeValidator, Validator)
 import Schema (FormArgumentF, FormSchema)
 import Wallet.API (WalletAPIError)
 import Wallet.Emulator.Types qualified as EM
@@ -168,6 +168,48 @@ someCardanoApiTxBridge = do
     typeModule ^== "Ledger.Tx.CardanoAPI"
     pure psJson
 
+cardanoBuildTxBridge :: BridgePart
+cardanoBuildTxBridge = do
+    typeName ^== "CardanoBuildTx"
+    typeModule ^== "Ledger.Tx.CardanoAPI"
+    pure psJson
+
+alonzoEraBridge :: BridgePart
+alonzoEraBridge = do
+    typeName ^== "AlonzoEra"
+    typeModule ^== "Cardano.Ledger.Alonzo"
+    pure psString
+
+standardCryptoBridge :: BridgePart
+standardCryptoBridge = do
+    typeName ^== "StandardCrypto"
+    typeModule ^== "Cardano.Ledger.Crypto"
+    pure psString
+
+applyTxErrorBridge :: BridgePart
+applyTxErrorBridge = do
+    typeName ^== "ApplyTxError"
+    typeModule ^== "Cardano.Ledger.Shelley.API.Mempool"
+    pure psString
+
+basicFailureBridge :: BridgePart
+basicFailureBridge = do
+    typeName ^== "BasicFailure"
+    typeModule ^== "Cardano.Ledger.Alonzo.Tools"
+    pure psString
+
+scriptFailureBridge :: BridgePart
+scriptFailureBridge = do
+    typeName ^== "ScriptFailure"
+    typeModule ^== "Cardano.Ledger.Alonzo.Tools"
+    pure psString
+
+utxosPredicateFailureBridge :: BridgePart
+utxosPredicateFailureBridge = do
+    typeName ^== "UtxosPredicateFailure"
+    typeModule ^== "Cardano.Ledger.Alonzo.Rules.Utxos"
+    pure psString
+
 exportTxBridge :: BridgePart
 exportTxBridge = do
     typeName ^== "ExportTx"
@@ -186,6 +228,13 @@ miscBridge =
     <|> satIntBridge
     <|> exBudgetBridge
     <|> someCardanoApiTxBridge
+    <|> cardanoBuildTxBridge
+    <|> alonzoEraBridge
+    <|> standardCryptoBridge
+    <|> applyTxErrorBridge
+    <|> basicFailureBridge
+    <|> scriptFailureBridge
+    <|> utxosPredicateFailureBridge
     <|> exportTxBridge
 
 ------------------------------------------------------------
@@ -375,15 +424,14 @@ ledgerTypes =
     , order . equal . genericShow . argonaut $ mkSumType @Priority
     , order . equal . genericShow . argonaut $ mkSumType @StopReason
     , order . genericShow . argonaut $ mkSumType @IterationID
-    , equal . genericShow . argonaut $ mkSumType @ScriptValidationEvent
     , equal . genericShow . argonaut $ mkSumType @ExCPU
     , equal . genericShow . argonaut $ mkSumType @ExMemory
-    , equal . genericShow . argonaut $ mkSumType @ScriptType
     , equal . genericShow . argonaut $ mkSumType @PABReq
     , equal . genericShow . argonaut $ mkSumType @PABResp
     , equal . genericShow . argonaut $ mkSumType @ChainIndexQuery
     , equal . genericShow . argonaut $ mkSumType @ChainIndexResponse
     , equal . genericShow . argonaut $ mkSumType @IsUtxoResponse
+    , equal . genericShow . argonaut $ mkSumType @(QueryResponse A)
     , equal . genericShow . argonaut $ mkSumType @TxosResponse
     , equal . genericShow . argonaut $ mkSumType @UtxosResponse
     , equal . genericShow . argonaut $ mkSumType @ChainIndexTx

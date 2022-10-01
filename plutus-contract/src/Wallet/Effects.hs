@@ -9,11 +9,12 @@
 {-# LANGUAGE NamedFieldPuns    #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE TemplateHaskell   #-}
+
 module Wallet.Effects(
     -- * Wallet effect
     WalletEffect(..)
     , submitTxn
-    , ownPaymentPubKeyHash
+    , ownAddresses
     , balanceTx
     , totalFunds
     , walletAddSignature
@@ -22,18 +23,20 @@ module Wallet.Effects(
     , NodeClientEffect(..)
     , publishTx
     , getClientSlot
-    , getClientSlotConfig
+    , getClientParams
     ) where
 
 import Control.Monad.Freer.TH (makeEffect)
-import Ledger (CardanoTx, PaymentPubKeyHash, Slot, Value)
+import Data.List.NonEmpty (NonEmpty)
+import Ledger (Address, CardanoTx, Params, Slot, Value)
 import Ledger.Constraints.OffChain (UnbalancedTx)
-import Ledger.TimeSlot (SlotConfig)
 import Wallet.Error (WalletAPIError)
+
+{-# DEPRECATED TotalFunds "We won't use the wallet for querying blockchain information. See https://plutus-apps.readthedocs.io/en/latest/adr/0005-pab-indexing-solution-integration.html" #-}
 
 data WalletEffect r where
     SubmitTxn :: CardanoTx -> WalletEffect ()
-    OwnPaymentPubKeyHash :: WalletEffect PaymentPubKeyHash
+    OwnAddresses :: WalletEffect (NonEmpty Address)
     BalanceTx :: UnbalancedTx -> WalletEffect (Either WalletAPIError CardanoTx)
     TotalFunds :: WalletEffect Value -- ^ Total of all funds that are in the wallet (incl. tokens)
     WalletAddSignature :: CardanoTx -> WalletEffect CardanoTx
@@ -44,5 +47,5 @@ makeEffect ''WalletEffect
 data NodeClientEffect r where
     PublishTx :: CardanoTx -> NodeClientEffect ()
     GetClientSlot :: NodeClientEffect Slot
-    GetClientSlotConfig :: NodeClientEffect SlotConfig
+    GetClientParams :: NodeClientEffect Params
 makeEffect ''NodeClientEffect

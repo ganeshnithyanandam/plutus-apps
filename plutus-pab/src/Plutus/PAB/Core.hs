@@ -39,7 +39,7 @@ module Plutus.PAB.Core
     , EffectHandlers(..)
     , runPAB
     , runPAB'
-    , PABEnvironment(appEnv)
+    , PABEnvironment(..)
     -- * Contracts and instances
     , reportContractState
     , activateContract
@@ -67,7 +67,6 @@ module Plutus.PAB.Core
     , activeContracts
     , finalResult
     , waitUntilFinished
-    , blockchainEnv
     , valueAt
     , askUserEnv
     , askBlockchainEnv
@@ -96,22 +95,20 @@ import Control.Monad.Freer.Extras.Modify qualified as Modify
 import Control.Monad.Freer.Reader (Reader (Ask), ask, asks, runReader)
 import Control.Monad.IO.Class (MonadIO (liftIO))
 import Data.Aeson qualified as JSON
-import Data.Default (Default (def))
 import Data.Foldable (traverse_)
 import Data.Map (Map)
 import Data.Map qualified as Map
-import Data.Maybe (catMaybes)
 import Data.Proxy (Proxy (Proxy))
 import Data.Set (Set)
 import Data.Text (Text)
-import Ledger (Address (addressCredential), TxOutRef)
+import Ledger (Address (addressCredential), Params, TxOutRef)
 import Ledger.Address (PaymentPubKeyHash)
 import Ledger.Tx (CardanoTx, ciTxOutValue)
 import Ledger.TxId (TxId)
 import Ledger.Value (Value)
 import Plutus.ChainIndex (ChainIndexQueryEffect, RollbackState (Unknown), TxOutStatus, TxStatus)
 import Plutus.ChainIndex qualified as ChainIndex
-import Plutus.ChainIndex.Api (UtxosResponse (page))
+import Plutus.ChainIndex.Api qualified as ChainIndex
 import Plutus.Contract.Effects (ActiveEndpoint (ActiveEndpoint, aeDescription), PABReq)
 import Plutus.Contract.Wallet (ExportTx)
 import Plutus.PAB.Core.ContractInstance (ContractInstanceMsg, ContractInstanceState)
@@ -336,11 +333,11 @@ callEndpointOnInstance' instanceID ep value = do
         $ Instances.callEndpointOnInstance state (EndpointDescription ep) (JSON.toJSON value) instanceID
 
 -- | Make a payment to a payment public key.
-payToPaymentPublicKey :: ContractInstanceId -> Wallet -> PaymentPubKeyHash -> Value -> PABAction t env CardanoTx
-payToPaymentPublicKey cid source target amount =
+payToPaymentPublicKey :: Params -> ContractInstanceId -> Wallet -> PaymentPubKeyHash -> Value -> PABAction t env CardanoTx
+payToPaymentPublicKey params cid source target amount =
     handleAgentThread source (Just cid)
         $ Modify.wrapError WalletError
-        $ WAPI.payToPaymentPublicKeyHash WAPI.defaultSlotRange amount target
+        $ WAPI.payToPaymentPublicKeyHash params WAPI.defaultSlotRange amount target
 
 -- | Effects available to contract instances with access to external services.
 type ContractInstanceEffects t env effs =
@@ -549,10 +546,11 @@ yieldedExportTxs instanceId = do
 
 currentSlot :: forall t env. PABAction t env (STM Slot)
 currentSlot = do
-    Instances.BlockchainEnv{Instances.beCurrentSlot} <- asks @(PABEnvironment t env) blockchainEnv
-    pure $ STM.readTVar beCurrentSlot
+    be <- asks @(PABEnvironment t env) blockchainEnv
+    pure $ Instances.currentSlot be
 
--- | Wait until the target slot number has been reached
+-- | Wait until the target slot number has been reached relative to the current
+-- slot.
 waitUntilSlot :: forall t env. Slot -> PABAction t env ()
 waitUntilSlot targetSlot = do
     tx <- currentSlot
@@ -560,6 +558,7 @@ waitUntilSlot targetSlot = do
         s <- tx
         guard (s >= targetSlot)
 
+-- | Wait for a certain number of slots relative to the current slot.
 waitNSlots :: forall t env. Int -> PABAction t env ()
 waitNSlots i = do
     current <- currentSlot >>= liftIO . STM.atomically
@@ -583,18 +582,10 @@ finalResult instanceId = do
 valueAt :: Wallet -> PABAction t env Value
 valueAt wallet = do
   handleAgentThread wallet Nothing $ do
-    utxoRefs <- getAllUtxoRefs def
-    txOutsM <- traverse ChainIndex.unspentTxOutFromRef utxoRefs
-    pure $ foldMap (view ciTxOutValue) $ catMaybes txOutsM
+    txOutsM <- ChainIndex.collectQueryResponse (\pq -> ChainIndex.unspentTxOutSetAtAddress pq cred)
+    pure $ foldMap (view ciTxOutValue . snd) $ concat txOutsM
   where
     cred = addressCredential $ mockWalletAddress wallet
-    getAllUtxoRefs pq = do
-      utxoRefsPage <- page <$> ChainIndex.utxoSetAtAddress pq cred
-      case ChainIndex.nextPageQuery utxoRefsPage of
-        Nothing -> pure $ ChainIndex.pageItems utxoRefsPage
-        Just newPageQuery -> do
-          restOfUtxoRefs <- getAllUtxoRefs newPageQuery
-          pure $ ChainIndex.pageItems utxoRefsPage <> restOfUtxoRefs
 
 -- | Wait until the contract is done, then return
 --   the error (if any)
@@ -646,7 +637,7 @@ handleInstancesStateReader = \case
     Ask -> asks @(PABEnvironment t env) instancesState
 
 -- | Handle the 'TimeEffect' by reading the current slot number from
---   the blockchain env.
+-- the blockchain env.
 handleTimeEffect ::
     forall t env m effs.
     ( Member (Reader (PABEnvironment t env)) effs
@@ -657,6 +648,5 @@ handleTimeEffect ::
     ~> Eff effs
 handleTimeEffect = \case
     SystemTime -> do
-        Instances.BlockchainEnv{Instances.beCurrentSlot} <- asks @(PABEnvironment t env) blockchainEnv
-        liftIO $ STM.readTVarIO beCurrentSlot
-
+        be <- asks @(PABEnvironment t env) blockchainEnv
+        liftIO $ STM.atomically $ Instances.currentSlot be

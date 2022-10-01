@@ -8,16 +8,18 @@
 module Plutus.Contract.Effects( -- TODO: Move to Requests.Internal
     -- * Plutus application backend request effect types
     PABReq(..),
+    _AdjustUnbalancedTxReq,
     _AwaitSlotReq,
     _AwaitTimeReq,
     _AwaitUtxoSpentReq,
     _AwaitUtxoProducedReq,
-    _CurrentSlotReq,
+    _CurrentPABSlotReq,
+    _CurrentChainIndexSlotReq,
     _CurrentTimeReq,
     _AwaitTxStatusChangeReq,
     _AwaitTxOutStatusChangeReq,
     _OwnContractInstanceIdReq,
-    _OwnPaymentPublicKeyHashReq,
+    _OwnAddressesReq,
     _ChainIndexQueryReq,
     _BalanceTxReq,
     _WriteBalancedTxReq,
@@ -40,17 +42,19 @@ module Plutus.Contract.Effects( -- TODO: Move to Requests.Internal
     _GetTip,
     -- * Plutus application backend response effect types
     PABResp(..),
+    _AdjustUnbalancedTxResp,
     _AwaitSlotResp,
     _AwaitTimeResp,
     _AwaitUtxoSpentResp,
     _AwaitUtxoProducedResp,
-    _CurrentSlotResp,
+    _CurrentPABSlotResp,
+    _CurrentChainIndexSlotResp,
     _CurrentTimeResp,
     _AwaitTxStatusChangeResp,
     _AwaitTxStatusChangeResp',
     _AwaitTxOutStatusChangeResp,
     _OwnContractInstanceIdResp,
-    _OwnPaymentPublicKeyHashResp,
+    _OwnAddressesResp,
     _ChainIndexQueryResp,
     _BalanceTxResp,
     _WriteBalancedTxResp,
@@ -89,8 +93,6 @@ import Data.List.NonEmpty (NonEmpty)
 import Data.OpenApi.Schema qualified as OpenApi
 import Data.String (fromString)
 import GHC.Generics (Generic)
-import Ledger (Address, AssetClass, Datum, DatumHash, MintingPolicy, MintingPolicyHash, PaymentPubKeyHash, Redeemer,
-               RedeemerHash, StakeValidator, StakeValidatorHash, TxId, TxOutRef, ValidatorHash)
 import Ledger.Constraints.OffChain (UnbalancedTx)
 import Ledger.Credential (Credential)
 import Ledger.Scripts (Validator)
@@ -99,26 +101,32 @@ import Ledger.Time (POSIXTime, POSIXTimeRange)
 import Ledger.TimeSlot (SlotConversionError)
 import Ledger.Tx (CardanoTx, ChainIndexTxOut, getCardanoTxId, onCardanoTx)
 import Plutus.ChainIndex (Page (pageItems), PageQuery)
-import Plutus.ChainIndex.Api (IsUtxoResponse (IsUtxoResponse), TxosResponse (TxosResponse),
-                              UtxosResponse (UtxosResponse))
+import Plutus.ChainIndex.Api (IsUtxoResponse (IsUtxoResponse), QueryResponse (QueryResponse),
+                              TxosResponse (TxosResponse), UtxosResponse (UtxosResponse))
 import Plutus.ChainIndex.Tx (ChainIndexTx (_citxTxId))
 import Plutus.ChainIndex.Types (Tip, TxOutStatus, TxStatus)
+import Plutus.Contract.CardanoAPI (ToCardanoError)
+import Plutus.V1.Ledger.Api (Address, Datum, DatumHash, MintingPolicy, MintingPolicyHash, Redeemer, RedeemerHash,
+                             StakeValidator, StakeValidatorHash, TxId, TxOutRef, ValidatorHash)
+import Plutus.V1.Ledger.Value (AssetClass)
 import Prettyprinter (Pretty (pretty), hsep, indent, viaShow, vsep, (<+>))
-import Wallet.API (WalletAPIError)
+import Wallet.Error (WalletAPIError)
 import Wallet.Types (ContractInstanceId, EndpointDescription, EndpointValue)
 
 -- | Requests that 'Contract's can make
 data PABReq =
-    AwaitSlotReq Slot
+    AdjustUnbalancedTxReq UnbalancedTx
+    | AwaitSlotReq Slot
     | AwaitTimeReq POSIXTime
     | AwaitUtxoSpentReq TxOutRef
     | AwaitUtxoProducedReq Address
     | AwaitTxStatusChangeReq TxId
     | AwaitTxOutStatusChangeReq TxOutRef
-    | CurrentSlotReq
+    | CurrentPABSlotReq
+    | CurrentChainIndexSlotReq
     | CurrentTimeReq
     | OwnContractInstanceIdReq
-    | OwnPaymentPublicKeyHashReq
+    | OwnAddressesReq
     | ChainIndexQueryReq ChainIndexQuery
     | BalanceTxReq UnbalancedTx
     | WriteBalancedTxReq CardanoTx
@@ -130,16 +138,18 @@ data PABReq =
 
 instance Pretty PABReq where
   pretty = \case
+    AdjustUnbalancedTxReq utx               -> "Adjust unbalanced tx:" <+> pretty utx
     AwaitSlotReq s                          -> "Await slot:" <+> pretty s
     AwaitTimeReq s                          -> "Await time:" <+> pretty s
     AwaitUtxoSpentReq utxo                  -> "Await utxo spent:" <+> pretty utxo
     AwaitUtxoProducedReq a                  -> "Await utxo produced:" <+> pretty a
-    CurrentSlotReq                          -> "Current slot"
+    CurrentPABSlotReq                       -> "Current PAB slot"
+    CurrentChainIndexSlotReq                -> "Current chain index slot"
     CurrentTimeReq                          -> "Current time"
     AwaitTxStatusChangeReq txid             -> "Await tx status change:" <+> pretty txid
     AwaitTxOutStatusChangeReq ref           -> "Await txout status change:" <+> pretty ref
     OwnContractInstanceIdReq                -> "Own contract instance ID"
-    OwnPaymentPublicKeyHashReq              -> "Own public key"
+    OwnAddressesReq                         -> "Own addresses"
     ChainIndexQueryReq q                    -> "Chain index query:" <+> pretty q
     BalanceTxReq utx                        -> "Balance tx:" <+> pretty utx
     WriteBalancedTxReq tx                   -> "Write balanced tx:" <+> onCardanoTx pretty (fromString . show) tx
@@ -149,16 +159,18 @@ instance Pretty PABReq where
 
 -- | Responses that 'Contract's receive
 data PABResp =
-    AwaitSlotResp Slot
+    AdjustUnbalancedTxResp (Either ToCardanoError UnbalancedTx)
+    | AwaitSlotResp Slot
     | AwaitTimeResp POSIXTime
     | AwaitUtxoSpentResp ChainIndexTx
     | AwaitUtxoProducedResp (NonEmpty ChainIndexTx)
     | AwaitTxStatusChangeResp TxId TxStatus
     | AwaitTxOutStatusChangeResp TxOutRef TxOutStatus
-    | CurrentSlotResp Slot
+    | CurrentPABSlotResp Slot
+    | CurrentChainIndexSlotResp Slot
     | CurrentTimeResp POSIXTime
     | OwnContractInstanceIdResp ContractInstanceId
-    | OwnPaymentPublicKeyHashResp PaymentPubKeyHash
+    | OwnAddressesResp (NonEmpty Address)
     | ChainIndexQueryResp ChainIndexResponse
     | BalanceTxResp BalanceTxResponse
     | WriteBalancedTxResp WriteBalancedTxResponse
@@ -170,16 +182,18 @@ data PABResp =
 
 instance Pretty PABResp where
   pretty = \case
+    AdjustUnbalancedTxResp utx               -> "Adjusted unbalanced tx: " <+> pretty utx
     AwaitSlotResp s                          -> "Slot:" <+> pretty s
     AwaitTimeResp s                          -> "Time:" <+> pretty s
     AwaitUtxoSpentResp utxo                  -> "Utxo spent:" <+> pretty utxo
     AwaitUtxoProducedResp addr               -> "Utxo produced:" <+> pretty addr
-    CurrentSlotResp s                        -> "Current slot:" <+> pretty s
+    CurrentPABSlotResp s                     -> "Current PAB slot:" <+> pretty s
+    CurrentChainIndexSlotResp s              -> "Current chain index slot:" <+> pretty s
     CurrentTimeResp s                        -> "Current time:" <+> pretty s
     AwaitTxStatusChangeResp txid status      -> "Status of" <+> pretty txid <+> "changed to" <+> pretty status
     AwaitTxOutStatusChangeResp ref status    -> "Status of" <+> pretty ref <+> "changed to" <+> pretty status
     OwnContractInstanceIdResp i              -> "Own contract instance ID:" <+> pretty i
-    OwnPaymentPublicKeyHashResp k            -> "Own public key:" <+> pretty k
+    OwnAddressesResp addrs                   -> "Own addresses:" <+> pretty addrs
     ChainIndexQueryResp rsp                  -> pretty rsp
     BalanceTxResp r                          -> "Balance tx:" <+> pretty r
     WriteBalancedTxResp r                    -> "Write balanced tx:" <+> pretty r
@@ -189,16 +203,18 @@ instance Pretty PABResp where
 
 matches :: PABReq -> PABResp -> Bool
 matches a b = case (a, b) of
+  (AdjustUnbalancedTxReq{}, AdjustUnbalancedTxResp{})      -> True
   (AwaitSlotReq{}, AwaitSlotResp{})                        -> True
   (AwaitTimeReq{}, AwaitTimeResp{})                        -> True
   (AwaitUtxoSpentReq{}, AwaitUtxoSpentResp{})              -> True
   (AwaitUtxoProducedReq{}, AwaitUtxoProducedResp{})        -> True
-  (CurrentSlotReq, CurrentSlotResp{})                      -> True
+  (CurrentPABSlotReq, CurrentPABSlotResp{})                -> True
+  (CurrentChainIndexSlotReq, CurrentChainIndexSlotResp{})              -> True
   (CurrentTimeReq, CurrentTimeResp{})                      -> True
   (AwaitTxStatusChangeReq i, AwaitTxStatusChangeResp i' _) -> i == i'
   (AwaitTxOutStatusChangeReq i, AwaitTxOutStatusChangeResp i' _) -> i == i'
   (OwnContractInstanceIdReq, OwnContractInstanceIdResp{})  -> True
-  (OwnPaymentPublicKeyHashReq, OwnPaymentPublicKeyHashResp{})                    -> True
+  (OwnAddressesReq, OwnAddressesResp {}) -> True
   (ChainIndexQueryReq r, ChainIndexQueryResp r')           -> chainIndexMatches r r'
   (BalanceTxReq{}, BalanceTxResp{})                        -> True
   (WriteBalancedTxReq{}, WriteBalancedTxResp{})            -> True
@@ -220,6 +236,7 @@ chainIndexMatches q r = case (q, r) of
     (UnspentTxOutFromRef{}, UnspentTxOutResponse{})          -> True
     (UtxoSetMembership{}, UtxoSetMembershipResponse{})       -> True
     (UtxoSetAtAddress{}, UtxoSetAtResponse{})                -> True
+    (UnspentTxOutSetAtAddress{}, UnspentTxOutsAtResponse{})  -> True
     (UtxoSetWithCurrency{}, UtxoSetWithCurrencyResponse{})   -> True
     (TxoSetAtAddress{}, TxoSetAtResponse{})                  -> True
     (TxsFromTxIds{}, TxIdsResponse{})                        -> True
@@ -240,6 +257,7 @@ data ChainIndexQuery =
   | TxFromTxId TxId
   | UtxoSetMembership TxOutRef
   | UtxoSetAtAddress (PageQuery TxOutRef) Credential
+  | UnspentTxOutSetAtAddress (PageQuery TxOutRef) Credential
   | UtxoSetWithCurrency (PageQuery TxOutRef) AssetClass
   | TxsFromTxIds [TxId]
   | TxoSetAtAddress (PageQuery TxOutRef) Credential
@@ -249,20 +267,21 @@ data ChainIndexQuery =
 
 instance Pretty ChainIndexQuery where
     pretty = \case
-        DatumFromHash h            -> "requesting datum from hash" <+> pretty h
-        ValidatorFromHash h        -> "requesting validator from hash" <+> pretty h
-        MintingPolicyFromHash h    -> "requesting minting policy from hash" <+> pretty h
-        StakeValidatorFromHash h   -> "requesting stake validator from hash" <+> pretty h
-        RedeemerFromHash h         -> "requesting redeemer from hash" <+> pretty h
-        TxOutFromRef r             -> "requesting utxo from utxo reference" <+> pretty r
-        UnspentTxOutFromRef r      -> "requesting utxo from utxo reference" <+> pretty r
-        TxFromTxId i               -> "requesting chain index tx from id" <+> pretty i
-        UtxoSetMembership txOutRef -> "whether tx output is part of the utxo set" <+> pretty txOutRef
-        UtxoSetAtAddress _ c       -> "requesting utxos located at addresses with the credential" <+> pretty c
-        UtxoSetWithCurrency _ ac   -> "requesting utxos containing the asset class" <+> pretty ac
-        TxsFromTxIds i             -> "requesting chain index txs from ids" <+> pretty i
-        TxoSetAtAddress _ c        -> "requesting txos located at addresses with the credential" <+> pretty c
-        GetTip                     -> "requesting the tip of the chain index"
+        DatumFromHash h              -> "requesting datum from hash" <+> pretty h
+        ValidatorFromHash h          -> "requesting validator from hash" <+> pretty h
+        MintingPolicyFromHash h      -> "requesting minting policy from hash" <+> pretty h
+        StakeValidatorFromHash h     -> "requesting stake validator from hash" <+> pretty h
+        RedeemerFromHash h           -> "requesting redeemer from hash" <+> pretty h
+        TxOutFromRef r               -> "requesting utxo from utxo reference" <+> pretty r
+        UnspentTxOutFromRef r        -> "requesting utxo from utxo reference" <+> pretty r
+        TxFromTxId i                 -> "requesting chain index tx from id" <+> pretty i
+        UtxoSetMembership txOutRef   -> "whether tx output is part of the utxo set" <+> pretty txOutRef
+        UtxoSetAtAddress _ c         -> "requesting utxos located at addresses with the credential" <+> pretty c
+        UnspentTxOutSetAtAddress _ c -> "requesting unspent utxos located at addresses with the credential" <+> pretty c
+        UtxoSetWithCurrency _ ac     -> "requesting utxos containing the asset class" <+> pretty ac
+        TxsFromTxIds i               -> "requesting chain index txs from ids" <+> pretty i
+        TxoSetAtAddress _ c          -> "requesting txos located at addresses with the credential" <+> pretty c
+        GetTip                       -> "requesting the tip of the chain index"
 
 -- | Represents all possible responses to chain index queries. Each constructor
 -- contain the output resulting for the chain index query. These possible
@@ -278,6 +297,7 @@ data ChainIndexResponse =
   | TxIdResponse (Maybe ChainIndexTx)
   | UtxoSetMembershipResponse IsUtxoResponse
   | UtxoSetAtResponse UtxosResponse
+  | UnspentTxOutsAtResponse (QueryResponse [(TxOutRef, ChainIndexTxOut)])
   | UtxoSetWithCurrencyResponse UtxosResponse
   | TxIdsResponse [ChainIndexTx]
   | TxoSetAtResponse TxosResponse
@@ -306,6 +326,8 @@ instance Pretty ChainIndexResponse where
             <+> pretty tip
             <+> "and utxo refs are"
             <+> hsep (fmap pretty $ pageItems txOutRefPage)
+        UnspentTxOutsAtResponse (QueryResponse txouts _) ->
+          "Chain index datums from address response:" <+> hsep (fmap pretty txouts)
         UtxoSetWithCurrencyResponse (UtxosResponse tip txOutRefPage) ->
                 "Chain index UTxO with asset class response:"
             <+> "Current tip is"
@@ -350,7 +372,7 @@ data WriteBalancedTxResponse =
 instance Pretty WriteBalancedTxResponse where
   pretty = \case
     WriteBalancedTxFailed e   -> "WriteBalancedTxFailed:" <+> pretty e
-    WriteBalancedTxSuccess tx -> "WriteBalancedTxFailed:" <+> pretty (getCardanoTxId tx)
+    WriteBalancedTxSuccess tx -> "WriteBalancedTxSuccess:" <+> pretty (getCardanoTxId tx)
 
 writeBalancedTxResponse :: Iso' WriteBalancedTxResponse (Either WalletAPIError CardanoTx)
 writeBalancedTxResponse = iso f g where
